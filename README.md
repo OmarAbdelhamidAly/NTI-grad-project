@@ -106,8 +106,41 @@ To prevent cross-team interference, the project uses **Exhaustive Module Isolati
 
 ---
 
-## 🛡️ Deployment & Merge Strategy
-1. **Isolated Branches:** Teams work on `csv/*` or `sql/*` branches.
-2. **Exhaustive Documentation:** Every new feature MUST be documented in the module's `DEVELOPER_GUIDE.md`.
-3. **Lazy Loading:** The worker only loads the module it needs—ensure your code doesn't create cross-module dependencies.
-4. **Lead Review:** Only the Project Lead can merge PRs into `main` after verifying the AI pipeline.
+---
+
+## 🛠️ Developer Workflow & Safety Guardrails
+
+To maintain architectural integrity, this project uses a **Container-Only Workflow**. 
+
+### 1. The Build & Run Ritual
+All developers must work inside Docker. This ensures environment parity (your machine vs. production).
+```bash
+# Start the entire stack
+docker compose up --build -d
+
+# Check the heartbeat
+docker compose ps
+```
+
+### 2. Automated Verification (Safety First)
+We have implemented a **GitHub Action** that runs the full test suite in Docker on every Pull Request.
+**Do NOT merge your code if the CI badge is Red 🔴.**
+
+To run the tests manually inside the container:
+```bash
+docker compose exec analyst-worker pytest tests/
+```
+
+### 3. Team Isolation Protocol (Preventing Interference)
+To ensure Team 1 (CSV) doesn't break Team 2 (SQL):
+- **Branch Naming**: Use `csv/feature-name` or `sql/feature-name`.
+- **Merge Rules**: You cannot merge to `main` until the CI passes successfully.
+- **Module Ownership**: Any changes to `app/modules/shared/` require approval from BOTH team leads.
+
+---
+
+## 🔑 Environment Configuration
+The `.env` file is now included in the repository (via `git add -f .env`) to allow immediate setup for the teams. 
+
+> [!WARNING]
+> Keep the GROQ API Key and other secrets confidential. If the repository is ever made public, immediately move these to GitHub Secrets and remove the `.env` file from version control.

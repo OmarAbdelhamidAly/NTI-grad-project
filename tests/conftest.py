@@ -1,13 +1,7 @@
-"""Pytest fixtures and test configuration.
-
-Uses SQLite in-memory for isolation — no PostgreSQL needed for testing.
-"""
-
-from __future__ import annotations
-
 import asyncio
 import uuid
 from typing import AsyncGenerator, Generator
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -21,6 +15,7 @@ from app.infrastructure.security import create_access_token, hash_password
 from app.main import app
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.data_source import DataSource
 
 # ── Async SQLite engine for tests ────────────────────────────
 
@@ -169,9 +164,40 @@ async def other_tenant_token(other_tenant_user: User) -> str:
     return make_token(other_tenant_user)
 
 
+# ── AI Mocking Fixtures ──────────────────────────────────────
+
+@pytest.fixture
+def mock_llm_response():
+    """Provides a controlled mock for LLM calls."""
+    mock = MagicMock()
+    mock.ainvoke.return_value = MagicMock(content="Mocked AI Insights")
+    return mock
+
+@pytest.fixture
+def mock_csv_worker_env():
+    """Mocks the environment for CSV worker tests."""
+    with patch("app.modules.csv.agents.analysis_agent.ChatGroq") as mock_groq:
+        yield mock_groq
+
+@pytest.fixture
+def mock_sql_worker_env():
+    """Mocks the environment for SQL worker tests."""
+    with patch("app.modules.sql.agents.analysis_agent.ChatGroq") as mock_groq:
+        yield mock_groq
+
+# ── Project Specific Fixtures ────────────────────────────────
+
 @pytest_asyncio.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
-    """Provide an async HTTP client for testing."""
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+async def sample_csv_data_source(db_session: AsyncSession, admin_user: User) -> DataSource:
+    """Create a sample CSV data source for testing."""
+    from app.models.data_source import DataSource
+    source = DataSource(
+        id=uuid.uuid4(),
+        tenant_id=admin_user.tenant_id,
+        name="Sales Data",
+        type="csv",
+        config={"path": "/tmp/test_sales.csv"}
+    )
+    db_session.add(source)
+    await db_session.commit()
+    return source

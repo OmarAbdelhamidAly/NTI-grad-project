@@ -76,3 +76,10 @@ The low-level executors that talk to your database.
 8.  **Safe Migration Agent**: A controlled agent that can perform schema updates (e.g., adding a foreign key) based on natural language instructions, with a human-in-the-loop approval step.
 9.  **Advanced Relationship Mapping**: Develop logic to crawl table data and find relationships between columns that don't have explicit Foreign Key constraints defined in the DB.
 10. **SQL Performance Dashboard**: Create an internal monitoring tool for the team to see which Natural Language questions generate the "Heaviest" or "Slowest" SQL queries.
+---
+
+## ✅ How to Verify Your Changes (SQL Team)
+1. **Security Audit**: Manually test the `run_sql_query` tool with a forbidden command (e.g., `DROP TABLE`) to ensure the regex still blocks it.
+2. **Introspection Test**: Connect to a new database and verify that `sql_schema_discovery` correctly identifies the primary keys and types.
+3. **Syntax Recovery**: intentionally provide a slightly wrong table name in a manual test to verify the `should_retry` loop fixes the SQL.
+4. **Integration**: Run `pytest tests/test_sql_pipeline.py`.

@@ -93,3 +93,10 @@ The low-level workers that manipulate the CSV files.
 8.  **Automated Feature Engineering**: Create a tool that suggests new calculated columns (e.g., converting "Birth Date" to "Age Group") to provide deeper insights.
 9.  **Automated Chart Narrations**: Use a vision-capable LLM to "look" at the generated Plotly charts and provide a one-sentence verbal summary of the visual trend.
 10. **CSV-to-SQL Migration Agent**: Build a high-level tool that generates the `CREATE TABLE` and `INSERT` scripts to move messy CSV data into the SQL module's database for permanent storage.
+---
+
+## ✅ How to Verify Your Changes (CSV Team)
+1. **Linting**: Ensure no unused imports (`flake8 app/modules/csv`).
+2. **Unit Test**: Run `pytest tests/` and specifically check CSV scenarios.
+3. **Log Monitoring**: While the worker is running, watch for `[CSV_PIPELINE]` tags in the logs.
+4. **Regression**: Test with a "Messy" CSV to ensure the `data_cleaning_agent` still repairs the data as expected.

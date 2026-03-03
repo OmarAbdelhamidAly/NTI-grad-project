@@ -1,4 +1,4 @@
-name: 🚀 Analyst CI Pipeline
+name: 🛡️ Project Verification CI
 
 on:
   push:
@@ -8,49 +8,47 @@ on:
 
 jobs:
   test:
+    name: 🐋 Containerized Testing
     runs-on: ubuntu-latest
-    
-    # Set up services like Postgres and Redis for integration tests
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: analyst
-          POSTGRES_PASSWORD: analyst_pass_123
-          POSTGRES_DB: analyst_db
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-          
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-          
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest pytest-asyncio
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        
-    - name: Lint with flake8
-      run: |
-        # Stop the build if there are Python syntax errors or undefined names
-        flake8 app/ --count --select=E9,F63,F7,F82 --show-source --statistics
-        # Exit-zero treats all errors as warnings.
-        flake8 app/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
-        
-        echo "✅ Code syntax checks passed! Ready for manual branch review."
+      - name: 🚚 Checkout Code
+        uses: actions/checkout@v3
+
+      - name: �️ Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: 💾 Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: 🏗️ Build & Start Services
+        run: |
+          docker compose build --build-arg BUILDKIT_INLINE_CACHE=1
+          docker compose up -d
+
+      - name: 🛡️ Isolation Guard (Architecture Check)
+        run: |
+          docker compose exec -T analyst-worker pytest tests/test_architecture.py
+
+      - name: 🧪 Run Full Test Suite
+        run: |
+          docker compose exec -T analyst-worker pytest tests/
+
+      - name: � Generate Logs on Failure
+        if: failure()
+        run: docker compose logs > docker-logs.txt
+
+      - name: �📊 Upload Logs on Failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-logs
+          path: docker-logs.txt
+          
+      - name: 🛑 Cleanup
+        if: always()
+        run: docker compose down
