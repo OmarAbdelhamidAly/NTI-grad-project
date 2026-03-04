@@ -17,10 +17,11 @@ from langchain_groq import ChatGroq
 from app.domain.analysis.entities import AnalysisState
 from app.infrastructure.config import settings
 from app.modules.shared.tools.load_data_source import resolve_data_path
+from app.modules.shared.utils.retrieval import get_kb_context
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-CSV_ANALYSIS_PROMPT = """You are a data analyst. Given the user question, schema, and intent,
+CSV_ANALYSIS_PROMPT = """You are a data analyst. Given the user question, schema, intent, and business metrics dictionary,
 write a precise analysis plan as JSON.
 
 Intent values and what tool they map to:
@@ -30,6 +31,8 @@ Intent values and what tool they map to:
 - comparison  → use operation "groupby" with group_by, agg_column, agg_function
 - anomaly     → use operation "trend" (anomaly detection is built-in to trend tool)
 - (default)   → use operation "sort", "filter", "aggregate", or "groupby"
+
+**CRITICAL**: Consult the "Business Metrics Dictionary" to understand company-specific terms. If a metric has a 'formula', try to replicate that logic using the available operations.
 
 Respond ONLY with valid JSON. No explanations. No markdown.
 
@@ -49,10 +52,17 @@ Fields:
   "label_column": "col"
 }}
 
+Business Metrics Dictionary:
+{metrics}
+
 Schema: {schema}
 Question: {question}
 Intent: {intent}
 Relevant columns: {columns}
+
+Knowledge Base Context (if relevant):
+{kb_context}
+
 {error_hint}"""
 
 
@@ -68,9 +78,13 @@ async def analysis_agent(state: AnalysisState) -> Dict[str, Any]:
     retry_count = state.get("retry_count", 0)
     previous_error = state.get("error")
 
+    # If this is a retry due to an error, pass the error hint to the model
     error_hint = ""
-    if previous_error and retry_count > 0:
-        error_hint = f"\n\nPrevious attempt failed with: {previous_error}\nPlease adjust your approach."
+    if state.get("error"):
+        error_hint = f"\n[RETRY HINT] Your previous plan failed with this error: {state['error']}\nPlease fix the logic."
+    
+    if state.get("policy_violation"):
+        error_hint += f"\n[POLICY VIOLATION] Your previous plan was REJECTED for this reason: {state['policy_violation']}\nYou MUST adjust your plan to comply with organization policies."
 
     llm = ChatGroq(
         model_name="llama-3.3-70b-versatile",
@@ -99,11 +113,18 @@ async def _run_csv_analysis(
     llm, state, schema_str, intent, columns, error_hint, retry_count
 ) -> Dict[str, Any]:
     """Generate an analysis plan and dispatch it to the correct CSV tool."""
+    metrics_str = json.dumps(state.get("business_metrics", []), indent=2)
+    metrics_str = json.dumps(state.get("business_metrics", []), indent=2)
+    # Retrieve Knowledge Base context if kb_id is present
+    kb_context = await get_kb_context(state.get("kb_id"), state["question"])
+
     prompt = CSV_ANALYSIS_PROMPT.format(
+        metrics=metrics_str,
         schema=schema_str,
         question=state["question"],
         intent=intent,
         columns=columns,
+        kb_context=kb_context or "No relevant document context found.",
         error_hint=error_hint,
     )
 

@@ -120,6 +120,111 @@ const api = {
     }
   },
 
+  // ── Metrics ──────────────────────────────────────────
+  async listMetrics() {
+    const res = await apiFetch('/metrics');
+    return res.json();
+  },
+
+  async createMetric(data) {
+    const res = await apiFetch('/metrics', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Failed to create metric');
+    }
+    return res.json();
+  },
+
+  async deleteMetric(id) {
+    const res = await apiFetch(`/metrics/${id}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Failed to delete metric');
+    }
+    return true;
+  },
+
+  // ── Knowledge Base ─────────────────────────────────
+  async listKBs() {
+    const res = await apiFetch('/knowledge');
+    return res.json();
+  },
+
+  async createKB(data) {
+    const res = await apiFetch('/knowledge', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+
+  async deleteKB(id) {
+    return apiFetch(`/knowledge/${id}`, { method: 'DELETE' });
+  },
+
+  async listDocuments(kbId) {
+    const res = await apiFetch(`/knowledge/${kbId}/documents`);
+    return res.json();
+  },
+
+  async uploadDocument(kbId, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('file', file);
+
+      xhr.open('POST', `${API_BASE}/knowledge/${kbId}/upload`);
+      xhr.setRequestHeader('Authorization', `Bearer ${getAccessToken()}`);
+
+      if (onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            onProgress(percent);
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.response));
+        } else {
+          try {
+            const err = JSON.parse(xhr.response);
+            reject(new Error(err.detail || 'Upload failed'));
+          } catch {
+            reject(new Error('Upload failed'));
+          }
+        }
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.send(formData);
+    });
+  },
+
+  // ── Policies ───────────────────────────────────────
+  async listPolicies() {
+    const res = await apiFetch('/policies');
+    return res.json();
+  },
+
+  async createPolicy(data) {
+    const res = await apiFetch('/policies', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+
+  async deletePolicy(id) {
+    return apiFetch(`/policies/${id}`, { method: 'DELETE' });
+  },
+
   // ── Data Sources ───────────────────────────────────
   async listDataSources() {
     const res = await apiFetch('/data-sources');
@@ -127,18 +232,41 @@ const api = {
     return res.json();
   },
 
-  async uploadFile(file) {
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await apiFetch('/data-sources/upload', {
-      method: 'POST',
-      body: formData,
+  async uploadFile(file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append('file', file);
+
+      xhr.open('POST', `${API_BASE}/data-sources/upload`);
+
+      // Auth header
+      const token = getAccessToken();
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          onProgress(percent);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText));
+        } else {
+          try {
+            const err = JSON.parse(xhr.responseText);
+            reject(new Error(err.detail || 'Upload failed'));
+          } catch {
+            reject(new Error('Upload failed'));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(formData);
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || 'Upload failed');
-    }
-    return res.json();
   },
 
   async connectSQL(data) {
@@ -165,10 +293,10 @@ const api = {
   },
 
 
-  async submitAnalysis(sourceId, question) {
+  async submitAnalysis(sourceId, question, kbId = null) {
     const res = await apiFetch('/analysis/query', {
       method: 'POST',
-      body: JSON.stringify({ source_id: sourceId, question }),
+      body: JSON.stringify({ source_id: sourceId, question, kb_id: kbId }),
     });
     if (!res.ok) {
       const err = await res.json();

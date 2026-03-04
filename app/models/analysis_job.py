@@ -48,6 +48,9 @@ class AnalysisJob(Base):
         DateTime(timezone=True), nullable=True
     )
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    kb_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), nullable=True
+    )
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships

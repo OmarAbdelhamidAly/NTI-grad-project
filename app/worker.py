@@ -69,6 +69,19 @@ async def _execute_pipeline(job_id: str) -> dict:
             select(DataSource).where(DataSource.id == job.source_id)
         )
         source = ds_result.scalar_one_or_none()
+        
+        # Load business metrics for the tenant
+        from app.models.metric import BusinessMetric
+        from app.models.policy import SystemPolicy
+        m_result = await db.execute(
+            select(BusinessMetric).where(BusinessMetric.tenant_id == job.tenant_id)
+        )
+        metrics = m_result.scalars().all()
+        metrics_list = [
+            {"name": m.name, "definition": m.definition, "formula": m.formula or "N/A"}
+            for m in metrics
+        ]
+
         if source is None:
             job.status = "error"
             job.error_message = "Data source not found"
@@ -85,6 +98,14 @@ async def _execute_pipeline(job_id: str) -> dict:
             "file_path": source.file_path,
             "config_encrypted": source.config_encrypted,
             "schema_summary": source.schema_json or {},
+            "business_metrics": metrics_list,
+            "kb_id": str(job.kb_id) if job.kb_id else None,
+            "system_policies": [
+                {"name": p.name, "type": p.rule_type, "description": p.description}
+                for p in (await db.execute(
+                    select(SystemPolicy).where(SystemPolicy.tenant_id == job.tenant_id)
+                )).scalars().all()
+            ],
             "retry_count": 0,
         }
 
@@ -121,5 +142,79 @@ async def _execute_pipeline(job_id: str) -> dict:
             # CRITICAL: Dispose of the engine to clear the connection pool.
             # This prevents loop-affinity issues when Celery runs the next task
             # on a new event loop (via asyncio.run).
+            from app.infrastructure.database.postgres import engine
+            await engine.dispose()
+
+
+@celery_app.task(name="process_document_indexing")
+def process_document_indexing(doc_id: str):
+    """Background task to extract text, chunk, embed, and index a document."""
+    import asyncio
+    return asyncio.run(_execute_indexing(doc_id))
+
+
+async def _execute_indexing(doc_id: str):
+    import pypdf
+    import os
+    from sqlalchemy import select
+    from app.infrastructure.database.postgres import async_session_factory
+    from app.models.knowledge import Document
+    from qdrant_client import QdrantClient
+
+    async with async_session_factory() as db:
+        res = await db.execute(select(Document).where(Document.id == uuid.UUID(doc_id)))
+        doc = res.scalar_one_or_none()
+        if not doc:
+            return {"error": "Doc not found"}
+
+        doc.status = "processing"
+        await db.commit()
+
+        try:
+            # 1. Extract Text
+            text = ""
+            if doc.name.lower().endswith(".pdf"):
+                with open(doc.file_path, "rb") as f:
+                    reader = pypdf.PdfReader(f)
+                    text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
+            else:
+                with open(doc.file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+
+            if not text.strip():
+                raise ValueError("No text extracted from document")
+
+            # 2. Chunking (Simple fixed-size chunks)
+            chunk_size = 1000
+            overlap = 200
+            chunks = []
+            for i in range(0, len(text), chunk_size - overlap):
+                chunks.append(text[i:i + chunk_size])
+
+            # 3. Embed & Index (Using Qdrant/FastEmbed)
+            # Collection name = kb_<kb_id without hyphens>
+            collection_name = f"kb_{str(doc.kb_id).replace('-', '')}"
+            
+            # Using Qdrant built-in fastembed support
+            client = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
+            client.set_model("BAAI/bge-small-en-v1.5")
+            
+            # Upsert
+            client.add(
+                collection_name=collection_name,
+                documents=chunks,
+                metadata=[{"doc_id": str(doc.id), "kb_id": str(doc.kb_id), "name": doc.name} for _ in chunks]
+            )
+
+            doc.status = "indexed"
+            await db.commit()
+            return {"status": "success", "chunks": len(chunks)}
+
+        except Exception as e:
+            doc.status = "error"
+            doc.metadata_json = {"error": str(e)}
+            await db.commit()
+            return {"error": str(e)}
+        finally:
             from app.infrastructure.database.postgres import engine
             await engine.dispose()

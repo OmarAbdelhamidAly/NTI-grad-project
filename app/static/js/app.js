@@ -38,6 +38,9 @@ const routes = {
   analysis: renderAnalysis,
   users: renderUsers,
   'source-dashboard': renderSourceDashboard,
+  knowledge: renderKnowledge,
+  'kb-detail': renderKBDetail,
+  policies: renderPolicies,
 };
 
 function navigate(page) {
@@ -85,8 +88,8 @@ function renderAuth() {
       <div class="auth-card">
         <div class="auth-logo">
           <div class="logo-icon">🧠</div>
-          <h1>Data Analyst Agent</h1>
-          <p>AI-powered autonomous data analysis</p>
+          <h1>DataAnalyst.AI</h1>
+          <p>Premium Autonomous Analysis</p>
         </div>
         <div class="auth-tabs">
           <button class="auth-tab active" data-tab="login" id="tab-login">Sign In</button>
@@ -94,14 +97,14 @@ function renderAuth() {
         </div>
         <div id="auth-form-login">
           <div class="form-group">
-            <label class="form-label">Email</label>
+            <label class="form-label">Email Address</label>
             <input type="email" class="form-input" id="login-email" placeholder="you@company.com">
           </div>
           <div class="form-group">
             <label class="form-label">Password</label>
             <input type="password" class="form-input" id="login-password" placeholder="••••••••">
           </div>
-          <button class="btn btn-primary btn-full" id="btn-login">Sign In</button>
+          <button class="btn btn-primary btn-full" id="btn-login">Sign In — Let's Go</button>
         </div>
         <div id="auth-form-register" class="hidden">
           <div class="form-group">
@@ -109,14 +112,14 @@ function renderAuth() {
             <input type="text" class="form-input" id="reg-tenant" placeholder="Acme Corp">
           </div>
           <div class="form-group">
-            <label class="form-label">Email</label>
+            <label class="form-label">Work Email</label>
             <input type="email" class="form-input" id="reg-email" placeholder="you@company.com">
           </div>
           <div class="form-group">
-            <label class="form-label">Password</label>
+            <label class="form-label">Choose Password</label>
             <input type="password" class="form-input" id="reg-password" placeholder="Min 8 characters">
           </div>
-          <button class="btn btn-primary btn-full" id="btn-register">Create Account</button>
+          <button class="btn btn-primary btn-full" id="btn-register">Create Global Account</button>
         </div>
       </div>
     </div>
@@ -144,7 +147,6 @@ function renderAuth() {
     try {
       const data = await api.login(email, password);
       setTokens(data.access_token, data.refresh_token);
-      // Decode JWT to get user info
       const payload = JSON.parse(atob(data.access_token.split('.')[1]));
       setUser({ id: payload.sub, email, role: payload.role, tenant_id: payload.tenant_id });
       showToast('Welcome back! 🎉', 'success');
@@ -195,26 +197,35 @@ function renderApp() {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="app-layout">
-      <aside class="sidebar" id="sidebar">
+      <aside class="sidebar" id="sidebar" style="background: var(--glass-bg); backdrop-filter: blur(var(--glass-blur)); border-right: 1px solid var(--glass-border);">
         <div class="sidebar-brand">
           <div class="sidebar-brand-icon">🧠</div>
-          <span class="sidebar-brand-text">Data Analyst AI</span>
+          <span class="sidebar-brand-text">DataAnalyst.AI</span>
         </div>
         <nav class="sidebar-nav">
-          <div class="nav-section">Main</div>
+          <div class="nav-section">Insights</div>
           <button class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
-            <span class="nav-icon">📊</span> Dashboard
+            <span class="nav-icon">📊</span> Overview
           </button>
+          <button class="nav-item" data-page="analysis" onclick="navigate('analysis')">
+            <span class="nav-icon">🔍</span> Deep Analysis
+          </button>
+          <button class="nav-item" data-page="metrics" onclick="navigate('metrics')">
+            <span class="nav-icon">📖</span> Metric Dictionary
+          </button>
+          <button class="nav-item" data-page="knowledge" onclick="navigate('knowledge')">
+            <span class="nav-icon">🧠</span> Knowledge Base
+          </button>
+          <div class="nav-section">Management</div>
           <button class="nav-item" data-page="data-sources" onclick="navigate('data-sources')">
             <span class="nav-icon">📁</span> Data Sources
           </button>
-          <button class="nav-item" data-page="analysis" onclick="navigate('analysis')">
-            <span class="nav-icon">🔍</span> Analysis
-          </button>
           ${isAdmin ? `
-          <div class="nav-section">Admin</div>
           <button class="nav-item" data-page="users" onclick="navigate('users')">
-            <span class="nav-icon">👥</span> Team Members
+            <span class="nav-icon">👥</span> Team Access
+          </button>
+          <button class="nav-item" data-page="policies" onclick="navigate('policies')">
+            <span class="nav-icon">🛡️</span> Governance
           </button>
           ` : ''}
         </nav>
@@ -222,9 +233,9 @@ function renderApp() {
           <div class="sidebar-avatar">${initials}</div>
           <div class="sidebar-user-info">
             <div class="sidebar-user-name">${user.email}</div>
-            <div class="sidebar-user-role">${user.role}</div>
+            <div class="sidebar-user-role">${user.role} Member</div>
           </div>
-          <button class="btn-icon" onclick="logout()" title="Sign out">🚪</button>
+          <button class="btn-icon" onclick="logout()" title="Sign out" style="border:none;background:transparent;">🚪</button>
         </div>
       </aside>
       <main class="main-content" id="main-content"></main>
@@ -244,34 +255,46 @@ async function renderDashboard(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">Dashboard</h1>
-        <p class="page-subtitle">Your analytics overview at a glance</p>
+        <h1 class="page-title">Executive Overview</h1>
+        <p class="page-subtitle">Real-time intelligence and system health</p>
       </div>
     </div>
     <div class="stats-grid" id="stats-grid">
-      <div class="stat-card"><div class="stat-label">Data Sources</div><div class="stat-value" id="stat-sources">—</div></div>
-      <div class="stat-card"><div class="stat-label">Analyses Run</div><div class="stat-value" id="stat-analyses">—</div></div>
-      <div class="stat-card"><div class="stat-label">Team Members</div><div class="stat-value" id="stat-users">—</div></div>
-      <div class="stat-card"><div class="stat-label">Success Rate</div><div class="stat-value" id="stat-success">—</div></div>
+      <div class="stat-card">
+        <div class="stat-label">Active Sources</div>
+        <div class="stat-value" id="stat-sources">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Analyses</div>
+        <div class="stat-value" id="stat-analyses">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Collaborators</div>
+        <div class="stat-value" id="stat-users">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Success Rate</div>
+        <div class="stat-value" id="stat-success">—</div>
+      </div>
     </div>
-    <div class="section-grid">
+    <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 2.5rem;">
       <div class="card">
-        <div class="card-header"><span class="card-title">Recent Analyses</span></div>
-        <div class="card-body" id="recent-analyses">
-          <div class="empty-state">
+        <div class="card-header"><span class="card-title">Recent Intelligence</span></div>
+        <div class="card-body" id="recent-analyses" style="padding:0;">
+          <div class="empty-state" style="padding:4rem;">
             <div class="empty-icon">🔍</div>
-            <h3>No analyses yet</h3>
-            <p>Go to the Analysis page to ask your first question</p>
+            <h3>No activity yet</h3>
+            <p>Initiate an analysis to see insights here.</p>
           </div>
         </div>
       </div>
       <div class="card">
-        <div class="card-header"><span class="card-title">Quick Actions</span></div>
+        <div class="card-header"><span class="card-title">Quick Control</span></div>
         <div class="card-body">
-          <div style="display:flex;flex-direction:column;gap:0.75rem;">
-            <button class="btn btn-secondary" onclick="navigate('data-sources')">📁 Upload Data Source</button>
-            <button class="btn btn-secondary" onclick="navigate('analysis')">🔍 New Analysis</button>
-            ${getUser()?.role === 'admin' ? '<button class="btn btn-secondary" onclick="navigate(\'users\')">👥 Manage Team</button>' : ''}
+          <div style="display:flex;flex-direction:column;gap:1rem;">
+            <button class="btn btn-secondary btn-full" onclick="navigate('data-sources')">📁 Manage Data</button>
+            <button class="btn btn-primary btn-full" onclick="navigate('analysis')">🔍 New Deep Analysis</button>
+            ${getUser()?.role === 'admin' ? '<button class="btn btn-secondary btn-full" onclick="navigate(\'users\')">👥 Team Access</button>' : ''}
           </div>
         </div>
       </div>
@@ -327,23 +350,37 @@ async function renderDataSources(container) {
     <div class="page-header">
       <div>
         <h1 class="page-title">Data Sources</h1>
-        <p class="page-subtitle">Manage CSV files and SQL database connections</p>
+        <p class="page-subtitle">Manage files and database connections</p>
       </div>
-      ${isAdmin ? `<div style="display:flex;gap:0.75rem;">
+      ${isAdmin ? `<div style="display:flex;gap:1rem;">
         <button class="btn btn-secondary" onclick="showSQLModal()">🔗 Connect SQL</button>
         <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">📤 Upload File</button>
         <input type="file" id="file-input" accept=".csv,.xlsx,.sqlite,.db,.sql" class="hidden">
       </div>` : ''}
     </div>
+
     ${isAdmin ? `
     <div class="upload-zone" id="upload-zone">
-      <div class="upload-icon">📂</div>
-      <div class="upload-text">Drag & drop your CSV, XLSX, SQLite or SQL file here, or <span>browse</span></div>
-    </div>` : ''}
-    <div class="card" style="margin-top:1.5rem;">
-      <div class="card-header"><span class="card-title">Your Data Sources</span></div>
+      <div class="upload-icon">�</div>
+      <div class="upload-text">Drag & drop files here, or <span>browse</span></div>
+    </div>
+    
+    <!-- Upload Progress Card -->
+    <div class="upload-status-card" id="upload-status-card">
+      <div class="upload-status-header">
+        <span id="upload-filename">uploading_file.csv</span>
+        <span id="upload-percentage">0%</span>
+      </div>
+      <div class="progress-container" style="display: block; margin: 0;">
+        <div class="progress-bar" id="upload-progress-bar"></div>
+      </div>
+    </div>
+    ` : ''}
+
+    <div class="card" style="margin-top:2.5rem;">
+      <div class="card-header"><span class="card-title">Connected Sources</span></div>
       <div class="card-body" id="sources-list">
-        <div style="text-align:center;padding:2rem;"><div class="spinner" style="margin:0 auto;"></div></div>
+        <div style="text-align:center;padding:3rem;"><div class="spinner" style="margin:0 auto;"></div></div>
       </div>
     </div>
     <!-- SQL Modal -->
@@ -373,22 +410,22 @@ async function renderDataSources(container) {
   if (isAdmin) {
     const fileInput = document.getElementById('file-input');
     const uploadZone = document.getElementById('upload-zone');
-
-    fileInput.onchange = async (e) => {
+    if (fileInput) fileInput.onchange = async (e) => {
       if (e.target.files[0]) await handleUpload(e.target.files[0]);
     };
-
-    uploadZone.onclick = () => fileInput.click();
-    uploadZone.ondragover = (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); };
-    uploadZone.ondragleave = () => uploadZone.classList.remove('dragover');
-    uploadZone.ondrop = async (e) => {
-      e.preventDefault();
-      uploadZone.classList.remove('dragover');
-      if (e.dataTransfer.files[0]) await handleUpload(e.dataTransfer.files[0]);
-    };
-
+    if (uploadZone) {
+      uploadZone.onclick = () => fileInput.click();
+      uploadZone.ondragover = (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); };
+      uploadZone.ondragleave = () => uploadZone.classList.remove('dragover');
+      uploadZone.ondrop = async (e) => {
+        e.preventDefault();
+        uploadZone.classList.remove('dragover');
+        if (e.dataTransfer.files[0]) await handleUpload(e.dataTransfer.files[0]);
+      };
+    }
     // SQL modal
-    document.getElementById('btn-connect-sql').onclick = async () => {
+    const connectBtn = document.getElementById('btn-connect-sql');
+    if (connectBtn) connectBtn.onclick = async () => {
       try {
         await api.connectSQL({
           name: document.getElementById('sql-name').value,
@@ -405,17 +442,44 @@ async function renderDataSources(container) {
       } catch (e) { showToast(e.message, 'error'); }
     };
   }
-
   loadSources();
 }
 
 async function handleUpload(file) {
+  const statusCard = document.getElementById('upload-status-card');
+  const progressBar = document.getElementById('upload-progress-bar');
+  const percentageTxt = document.getElementById('upload-percentage');
+  const filenameTxt = document.getElementById('upload-filename');
+
+  if (statusCard) {
+    statusCard.style.display = 'block';
+    filenameTxt.textContent = `Uploading ${file.name}...`;
+    progressBar.style.width = '0%';
+    percentageTxt.textContent = '0%';
+  }
+
   try {
-    showToast('Uploading...', 'info');
-    await api.uploadFile(file);
-    showToast(`"${file.name}" uploaded! ✓`, 'success');
+    await api.uploadFile(file, (percent) => {
+      if (progressBar) progressBar.style.width = `${percent}%`;
+      if (percentageTxt) percentageTxt.textContent = `${percent}%`;
+    });
+
+    if (statusCard) {
+      filenameTxt.textContent = `Processing ${file.name}...`;
+      progressBar.style.width = '100%';
+    }
+
+    showToast(`"${file.name}" uploaded successfully!`, 'success');
     loadSources();
-  } catch (e) { showToast(e.message, 'error'); }
+
+    // Hide progress bar after a short delay
+    setTimeout(() => {
+      if (statusCard) statusCard.style.display = 'none';
+    }, 2000);
+  } catch (e) {
+    showToast(e.message, 'error');
+    if (statusCard) statusCard.style.display = 'none';
+  }
 }
 
 async function loadSources() {
@@ -423,43 +487,46 @@ async function loadSources() {
     const data = await api.listDataSources();
     const list = document.getElementById('sources-list');
     if (!data.data_sources?.length) {
-      list.innerHTML = `<div class="empty-state"><div class="empty-icon">📂</div><h3>No data sources</h3><p>Upload a CSV file or connect a SQL database to get started</p></div>`;
+      list.innerHTML = `<div class="empty-state" style="padding:4rem;"><div class="empty-icon">📂</div><h3>Ready for Data</h3><p>Upload a file or connect a database to begin analysis</p></div>`;
       return;
     }
     list.innerHTML = data.data_sources.map(s => {
       let meta = 'Connected';
       if (s.type === 'csv' && s.schema_json?.row_count) {
-        meta = `${s.schema_json.row_count.toLocaleString()} rows · ${s.schema_json.column_count} columns`;
+        meta = `${s.schema_json.row_count.toLocaleString()} rows · ${s.schema_json.column_count} cols`;
       } else if (s.type === 'sql' && s.schema_json?.table_count) {
-        meta = `${s.schema_json.table_count} tables · ${s.schema_json.total_columns || 'multiple'} columns`;
+        meta = `${s.schema_json.table_count} tables · ${s.schema_json.total_columns || 'DB'} cols`;
       }
 
       const statusIcon = {
         pending: '⏳',
-        running: '<span class="spinner-sm"></span>',
+        running: '<div class="spinner-sm"></div>',
         done: '✅',
         failed: '⚠️',
       }[s.auto_analysis_status] || '⏳';
 
       const statusLabel = {
-        pending: 'Auto-analysis pending',
-        running: 'AI is analysing your data…',
-        done: 'AI insights ready',
-        failed: 'Auto-analysis failed',
+        pending: 'Wait..',
+        running: 'Analysing...',
+        done: 'AI Insights Ready',
+        failed: 'AI Failed',
       }[s.auto_analysis_status] || '';
 
       return `
-        <div class="source-item" id="source-item-${s.id}">
-          <div class="source-icon ${s.type}">${s.type === 'csv' ? '📄' : '🗄️'}</div>
-          <div class="source-info">
-            <div class="source-name">${s.name}</div>
-            <div class="source-meta">${s.type.toUpperCase()} · ${meta}</div>
-            <div class="source-status">${statusIcon} ${statusLabel}</div>
+        <div class="source-item card" style="display:flex;align-items:center;padding:1.5rem;margin-bottom:1rem;gap:1.5rem;background:rgba(255,255,255,0.02);border:1px solid var(--glass-border);border-radius:14px;transition:var(--transition);text-decoration:none;">
+          <div class="source-icon ${s.type}" style="width:48px;height:48px;background:rgba(255,255,255,0.05);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;">
+            ${s.type === 'csv' ? '📄' : '🗄️'}
           </div>
-          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
-            <span class="badge ${s.type === 'csv' ? 'badge-info' : 'badge-success'}">${s.type}</span>
-            ${s.auto_analysis_status === 'done' ? `<button class="btn btn-sm btn-primary" onclick="openSourceDashboard('${s.id}')">📊 Dashboard</button>` : ''}
-            <button class="btn btn-sm btn-secondary" onclick="navigateToAnalysis('${s.id}')">🔍 Ask</button>
+          <div class="source-info" style="flex:1;">
+            <div class="source-name" style="font-weight:700;font-size:1.1rem;margin-bottom:0.25rem;">${s.name}</div>
+            <div class="source-meta" style="font-size:0.85rem;color:var(--text-muted);"> ${s.type.toUpperCase()} · ${meta}</div>
+          </div>
+          <div class="source-status" style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;font-weight:600;color:var(--primary-400);">
+            ${statusIcon} ${statusLabel}
+          </div>
+          <div style="display:flex;gap:0.75rem;">
+            ${s.auto_analysis_status === 'done' ? `<button class="btn btn-sm btn-primary" onclick="openSourceDashboard('${s.id}')">📊 Metrics</button>` : ''}
+            <button class="btn btn-sm btn-secondary" onclick="navigateToAnalysis('${s.id}')">🔍 Query</button>
             ${getUser()?.role === 'admin' ? `<button class="btn btn-sm btn-danger" onclick="deleteSource('${s.id}')">Delete</button>` : ''}
           </div>
         </div>
@@ -471,7 +538,9 @@ async function loadSources() {
     if (running.length > 0) {
       setTimeout(loadSources, 5000);
     }
-  } catch (e) { showToast('Failed to load data sources', 'error'); }
+  } catch (e) {
+    showToast('Failed to load data sources', 'error');
+  }
 }
 
 function openSourceDashboard(sourceId) {
@@ -501,42 +570,48 @@ async function renderAnalysis(container) {
   container.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">Analysis</h1>
-        <p class="page-subtitle">Ask questions about your data in plain English</p>
+        <h1 class="page-title">Deep Analysis</h1>
+        <p class="page-subtitle">Conversational intelligence powered by your data</p>
       </div>
     </div>
     <div class="analysis-container">
       <div class="analysis-main card">
-        <div class="card-body" style="display:flex;flex-direction:column;height:100%;">
-          <div class="form-group">
-            <label class="form-label">Data Source</label>
-            <select class="form-select" id="analysis-source"><option value="">Loading...</option></select>
-          </div>
-          <div class="analysis-messages" id="analysis-messages">
-            <div class="empty-state">
-              <div class="empty-icon">💡</div>
-              <h3>Ask your data a question</h3>
-              <p>Select a data source and type your question below</p>
+        <div class="card-body" style="display:flex;flex-direction:column;height:100%;padding:0;">
+          <div style="padding:1.5rem 2rem; border-bottom:1px solid var(--glass-border); display:grid; grid-template-columns:1fr 1fr; gap:1.5rem;">
+            <div>
+              <label class="form-label" style="margin-bottom:0.5rem;">Target Data Source</label>
+              <select class="form-select" id="analysis-source" style="background:rgba(255,255,255,0.03);"><option value="">Loading sources...</option></select>
+            </div>
+            <div>
+              <label class="form-label" style="margin-bottom:0.5rem;">🧠 Knowledge Base Context (RAG)</label>
+              <select class="form-select" id="analysis-kb" style="background:rgba(255,255,255,0.03);"><option value="">None (General analysis)</option></select>
             </div>
           </div>
-          <div class="analysis-input-area">
-            <input class="analysis-input" id="analysis-query" placeholder="e.g. What are the top 5 products by revenue this quarter?">
-            <button class="btn btn-primary" id="btn-analyze">Analyze</button>
+          <div class="analysis-messages" id="analysis-messages">
+            <div class="empty-state" style="padding:4rem;">
+              <div class="empty-icon">💡</div>
+              <h3>Intelligent Assistant</h3>
+              <p>Select a source and ask anything about your data.</p>
+            </div>
+          </div>
+          <div class="analysis-input-area" style="padding:1.5rem 2rem; background:rgba(255,255,255,0.02);">
+            <input class="analysis-input" id="analysis-query" placeholder="e.g. Compare revenue trends between this year and last year...">
+            <button class="btn btn-primary" id="btn-analyze">Run AI</button>
           </div>
         </div>
       </div>
       <div class="results-sidebar" id="results-sidebar">
         <div class="result-card">
-          <div class="result-card-header">📊 Chart</div>
-          <div class="result-card-body"><div class="chart-container" id="chart-area">Run an analysis to see charts</div></div>
+          <div class="result-card-header">📊 Neural visualization</div>
+          <div class="result-card-body" style="padding:1rem;"><div class="chart-container" id="chart-area" style="min-height:240px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:0.9rem;">Charts will appear here</div></div>
         </div>
         <div class="result-card">
-          <div class="result-card-header">💡 Executive Summary</div>
-          <div class="result-card-body" id="exec-summary">Run an analysis to see insights</div>
+          <div class="result-card-header">💡 AI Summary</div>
+          <div class="result-card-body" id="exec-summary" style="font-size:0.95rem;line-height:1.6;color:var(--text-dim);">Executive findings will be distilled here.</div>
         </div>
         <div class="result-card">
-          <div class="result-card-header">🎯 Recommendations</div>
-          <div class="result-card-body" id="recommendations">Run an analysis to see recommendations</div>
+          <div class="result-card-header">🎯 Recommendation Engine</div>
+          <div class="result-card-body" id="recommendations" style="font-size:0.95rem;color:var(--text-dim);">Strategic actions will be predicted here.</div>
         </div>
       </div>
     </div>
@@ -558,29 +633,42 @@ async function renderAnalysis(container) {
     } else {
       select.innerHTML = '<option value="">No data sources available</option>';
     }
-  } catch { }
+    // Load KBs for dropdown
+    try {
+      const kbData = await api.listKBs();
+      const kbSelect = document.getElementById('analysis-kb');
+      if (kbData.knowledge_bases?.length) {
+        kbSelect.innerHTML += kbData.knowledge_bases.map(kb =>
+          `<option value="${kb.id}">${kb.name}</option>`
+        ).join('');
+      }
+    } catch { }
 
-  // Analyze button
-  document.getElementById('btn-analyze').onclick = submitAnalysis;
-  const inputEl = document.getElementById('analysis-query');
+    // Analyze button
+    document.getElementById('btn-analyze').onclick = submitAnalysis;
+    const inputEl = document.getElementById('analysis-query');
 
-  inputEl.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') submitAnalysis();
-  });
+    inputEl.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') submitAnalysis();
+    });
 
-  // Pre-fill question if navigated from AI Dashboard
-  if (window._prefilledQuestion) {
-    inputEl.value = window._prefilledQuestion;
-    window._prefilledQuestion = null;
-    // Auto-focus and simulate click if a source is also selected
-    if (document.getElementById('analysis-source').value) {
-      setTimeout(submitAnalysis, 300);
+    // Pre-fill question if navigated from AI Dashboard
+    if (window._prefilledQuestion) {
+      inputEl.value = window._prefilledQuestion;
+      window._prefilledQuestion = null;
+      // Auto-focus and simulate click if a source is also selected
+      if (document.getElementById('analysis-source').value) {
+        setTimeout(submitAnalysis, 300);
+      }
     }
+  } catch (e) {
+    console.error('renderAnalysis error:', e);
   }
 }
 
 async function submitAnalysis() {
   const sourceId = document.getElementById('analysis-source').value;
+  const kbId = document.getElementById('analysis-kb').value || null;
   const question = document.getElementById('analysis-query').value.trim();
   if (!sourceId || !question) return showToast('Select a source and enter a question', 'error');
 
@@ -605,7 +693,7 @@ async function submitAnalysis() {
   document.getElementById('analysis-query').value = '';
 
   try {
-    const job = await api.submitAnalysis(sourceId, question);
+    const job = await api.submitAnalysis(sourceId, question, kbId);
 
     // Poll for results
     let result = job;
@@ -734,14 +822,14 @@ async function loadUsers() {
       return;
     }
     list.innerHTML = data.users.map(u => `
-      <div class="user-item">
-        <div class="user-avatar-sm">${u.email.substring(0, 2).toUpperCase()}</div>
-        <div class="source-info">
-          <div class="source-name">${u.email}</div>
-          <div class="source-meta">Joined ${new Date(u.created_at).toLocaleDateString()}</div>
+      <div class="user-item card" style="display:flex;align-items:center;padding:1.25rem 1.5rem;margin-bottom:1rem;gap:1.5rem;background:rgba(255,255,255,0.02);border:1px solid var(--glass-border);border-radius:14px;">
+        <div class="sidebar-avatar" style="width:40px;height:40px;flex-shrink:0;">${u.email.substring(0, 2).toUpperCase()}</div>
+        <div class="source-info" style="flex:1;">
+          <div class="source-name" style="font-weight:700;">${u.email}</div>
+          <div class="source-meta" style="font-size:0.85rem;color:var(--text-muted);">Joined ${new Date(u.created_at).toLocaleDateString()}</div>
         </div>
-        <span class="badge ${u.role === 'admin' ? 'badge-info' : 'badge-neutral'}">${u.role}</span>
-        ${u.id !== getUser()?.id ? `<button class="btn btn-sm btn-danger" onclick="removeUser('${u.id}')">Remove</button>` : ''}
+        <span class="badge ${u.role === 'admin' ? 'badge-info' : 'badge-success'}">${u.role}</span>
+        ${u.id !== getUser()?.id ? `<button class="btn btn-sm btn-secondary" style="color:#EF4444;border-color:rgba(239,68,68,0.2);" onclick="removeUser('${u.id}')">Remove</button>` : ''}
       </div>
     `).join('');
   } catch (e) { showToast('Failed to load users', 'error'); }
@@ -1050,3 +1138,407 @@ function navigateToAnalysisWithQ(sourceId, question) {
   window._prefilledQuestion = question;
   navigate('analysis');
 }
+
+// ── Metrics Page ───────────────────────────────────────
+async function renderMetrics(container) {
+  const isAdmin = getUser()?.role === 'admin';
+  container.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Metric Dictionary</h1>
+        <p class="page-subtitle">Define business terms to help the AI understand your data</p>
+      </div>
+      ${isAdmin ? `<button class="btn btn-primary" onclick="showMetricModal()">➕ Add Metric</button>` : ''}
+    </div>
+    <div class="card">
+      <div class="card-body" id="metrics-list">
+        <div style="text-align:center;padding:3rem;"><div class="spinner" style="margin:0 auto;"></div></div>
+      </div>
+    </div>
+    <!-- Metric Modal -->
+    <div class="modal-overlay" id="metric-modal">
+      <div class="modal">
+        <div class="modal-header"><h3 class="modal-title">Define New Metric</h3><button class="btn-icon" onclick="closeMetricModal()">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label class="form-label">Metric Name</label><input class="form-input" id="metric-name" placeholder="e.g. Monthly Active Users"></div>
+          <div class="form-group"><label class="form-label">Business Definition</label><textarea class="form-input" id="metric-def" rows="3" placeholder="Explain what this means in plain English..."></textarea></div>
+          <div class="form-group"><label class="form-label">Formula (Optional)</label><input class="form-input" id="metric-formula" placeholder="e.g. count(distinct user_id) where login_date > now() - interval '30 days'"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeMetricModal()">Cancel</button>
+          <button class="btn btn-primary" id="btn-save-metric">Save Metric</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  loadMetrics();
+
+  if (isAdmin) {
+    document.getElementById('btn-save-metric').onclick = async () => {
+      try {
+        await api.createMetric({
+          name: document.getElementById('metric-name').value,
+          definition: document.getElementById('metric-def').value,
+          formula: document.getElementById('metric-formula').value,
+        });
+        closeMetricModal();
+        showToast('Metric defined! 📖', 'success');
+        loadMetrics();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+  }
+}
+
+async function loadMetrics() {
+  try {
+    const data = await api.listMetrics();
+    const list = document.getElementById('metrics-list');
+    if (!data.metrics?.length) {
+      list.innerHTML = `<div class="empty-state" style="padding:4rem;"><div class="empty-icon">📖</div><h3>Dictionary is empty</h3><p>Defining metrics helps the AI provide more accurate business insights.</p></div>`;
+      return;
+    }
+    list.innerHTML = `
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead><tr><th>Metric</th><th>Definition</th><th>Formula</th><th>Actions</th></tr></thead>
+          <tbody>${data.metrics.map(m => `
+            <tr>
+              <td style="font-weight:700;color:var(--primary-400);">${m.name}</td>
+              <td style="max-width:300px;white-space:normal;font-size:0.9rem;">${m.definition}</td>
+              <td><code>${m.formula || '—'}</code></td>
+              <td style="text-align:right;">
+                ${getUser()?.role === 'admin' ? `<button class="btn btn-sm btn-icon" title="Delete" onclick="handleMetricDelete('${m.id}')">🗑️</button>` : '—'}
+              </td>
+            </tr>
+          `).join('')}</tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) { showToast('Failed to load metrics', 'error'); }
+}
+
+async function handleMetricDelete(id) {
+  if (!confirm('Remove this metric definition?')) return;
+  try {
+    await api.deleteMetric(id);
+    showToast('Metric removed', 'info');
+    loadMetrics();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+function showMetricModal() { document.getElementById('metric-modal').classList.add('open'); }
+function closeMetricModal() { document.getElementById('metric-modal').classList.remove('open'); }
+
+// ── Knowledge Base Page ──────────────────────────────────
+async function renderKnowledge(container) {
+  const isAdmin = getUser()?.role === 'admin';
+  container.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Knowledge Base</h1>
+        <p class="page-subtitle">Manage documents and context for AI analysis</p>
+      </div>
+      ${isAdmin ? `<button class="btn btn-primary" onclick="showKBModal()">➕ New Collection</button>` : ''}
+    </div>
+    <div class="kb-grid" id="kb-list">
+      <div style="text-align:center;padding:3rem;grid-column:1/-1;"><div class="spinner" style="margin:0 auto;"></div></div>
+    </div>
+    <!-- KB Modal -->
+    <div class="modal-overlay" id="kb-modal">
+      <div class="modal">
+        <div class="modal-header"><h3 class="modal-title">New Knowledge Base</h3><button class="btn-icon" onclick="closeKBModal()">✕</button></div>
+        <div class="modal-body">
+          <div class="form-group"><label class="form-label">Name</label><input class="form-input" id="kb-name" placeholder="e.g. Legal Documents"></div>
+          <div class="form-group"><label class="form-label">Description</label><textarea class="form-input" id="kb-desc" rows="2" placeholder="What kind of documents are in this collection?"></textarea></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeKBModal()">Cancel</button>
+          <button class="btn btn-primary" id="btn-save-kb">Create Collection</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  loadKnowledgeBases();
+
+  if (isAdmin) {
+    document.getElementById('btn-save-kb').onclick = async () => {
+      try {
+        await api.createKB({
+          name: document.getElementById('kb-name').value,
+          description: document.getElementById('kb-desc').value,
+        });
+        closeKBModal();
+        showToast('Knowledge Base created! 🧠', 'success');
+        loadKnowledgeBases();
+      } catch (e) { showToast(e.message, 'error'); }
+    };
+  }
+}
+
+async function loadKnowledgeBases() {
+  try {
+    const data = await api.listKBs();
+    const list = document.getElementById('kb-list');
+    if (!data.knowledge_bases?.length) {
+      list.innerHTML = `<div class="empty-state" style="grid-column:1/-1;padding:4rem;"><div class="empty-icon">🧠</div><h3>No collections yet</h3><p>Create a collection to start indexing your documents.</p></div>`;
+      return;
+    }
+    list.innerHTML = data.knowledge_bases.map(kb => `
+      <div class="card kb-card" onclick="navigate('kb-detail', { id: '${kb.id}', name: '${kb.name}' })" style="cursor:pointer;transition:transform 0.2s;">
+        <div class="card-body">
+          <div style="font-size:2rem;margin-bottom:1rem;">📂</div>
+          <h3 style="margin:0 0 0.5rem 0;">${kb.name}</h3>
+          <p style="font-size:0.85rem;color:var(--text-muted);margin-bottom:1rem;">${kb.description || 'No description'}</p>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.8rem;color:var(--primary-400);">
+            <span>${kb.document_count} Documents</span>
+            <span>View Details →</span>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) { showToast('Failed to load collections', 'error'); }
+}
+
+function showKBModal() { document.getElementById('kb-modal').classList.add('open'); }
+function closeKBModal() { document.getElementById('kb-modal').classList.remove('open'); }
+
+// ── KB Detail Page ──────────────────────────────────────
+async function renderKBDetail(container) {
+  const kb = window._pageParams;
+  if (!kb || !kb.id) { navigate('knowledge'); return; }
+
+  const isAdmin = getUser()?.role === 'admin';
+  container.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+          <button class="btn-icon" onclick="navigate('knowledge')" style="padding:0;">←</button>
+          <span style="color:var(--text-muted);">Knowledge Base</span>
+        </div>
+        <h1 class="page-title">📂 ${kb.name}</h1>
+      </div>
+      ${isAdmin ? `
+      <div style="display:flex;gap:0.75rem;">
+        <label class="btn btn-primary" style="margin:0;cursor:pointer;">
+          ➕ Upload Document
+          <input type="file" id="kb-file-upload" style="display:none;" onchange="handleKBFileUpload('${kb.id}')">
+        </label>
+        <button class="btn btn-secondary" style="color:#EF4444;" onclick="handleKBDelete('${kb.id}')">Delete Collection</button>
+      </div>
+      ` : ''}
+    </div>
+
+    <!-- Upload Progress Card -->
+    <div id="kb-upload-card" class="card" style="display:none;margin-bottom:1.5rem;background:rgba(255,255,255,0.02);border:1px solid var(--glass-border);">
+      <div class="card-body" style="padding:1rem;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem;">
+          <span id="kb-upload-filename" style="font-weight:600;">document.pdf</span>
+          <span id="kb-upload-percent">0%</span>
+        </div>
+        <div class="progress-bar-container"><div id="kb-upload-progress" class="progress-bar" style="width:0%;"></div></div>
+        <div id="kb-upload-status" style="font-size:0.75rem;margin-top:0.5rem;color:var(--text-muted);">Uploading to secure vault...</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body" id="document-list">
+        <div style="text-align:center;padding:3rem;"><div class="spinner" style="margin:0 auto;"></div></div>
+      </div>
+    </div>
+  `;
+
+  loadDocuments(kb.id);
+}
+
+async function loadDocuments(kbId) {
+  try {
+    const data = await api.listDocuments(kbId);
+    const list = document.getElementById('document-list');
+    if (!list) return;
+    if (!data.documents?.length) {
+      list.innerHTML = `<div class="empty-state" style="padding:4rem;"><div class="empty-icon">📄</div><h3>Empty Collection</h3><p>Upload PDFs or text files to add context for the AI.</p></div>`;
+      return;
+    }
+    list.innerHTML = `
+      <div class="table-wrapper">
+        <table class="data-table">
+          <thead><tr><th>Name</th><th>Status</th><th>Added</th><th>Actions</th></tr></thead>
+          <tbody>${data.documents.map(doc => {
+      let statusBadge = '';
+      if (doc.status === 'indexed') statusBadge = '<span class="badge badge-success">✓ Indexed</span>';
+      else if (doc.status === 'error') statusBadge = '<span class="badge badge-error">⚠ Error</span>';
+      else statusBadge = '<span class="badge badge-info">⌛ Processing</span>';
+
+      return `
+              <tr>
+                <td style="font-weight:600;">${doc.name}</td>
+                <td>${statusBadge}</td>
+                <td style="font-size:0.85rem;">${new Date(doc.created_at).toLocaleDateString()}</td>
+                <td>
+                  ${getUser()?.role === 'admin' ? `
+                    <button class="btn btn-sm btn-icon" title="Delete" onclick="deleteDocument('${kbId}', '${doc.id}')">🗑️</button>
+                  ` : '—'}
+                </td>
+              </tr>
+            `;
+    }).join('')}</tbody>
+        </table>
+      </div>
+    `;
+  } catch (e) { showToast('Failed to load documents', 'error'); }
+}
+
+async function handleKBFileUpload(kbId) {
+  const input = document.getElementById('kb-file-upload');
+  const file = input.files[0];
+  if (!file) return;
+
+  const card = document.getElementById('kb-upload-card');
+  const bar = document.getElementById('kb-upload-progress');
+  const percentText = document.getElementById('kb-upload-percent');
+  const nameText = document.getElementById('kb-upload-filename');
+  const statusText = document.getElementById('kb-upload-status');
+
+  nameText.innerText = file.name;
+  card.style.display = 'block';
+  bar.style.width = '0%';
+  percentText.innerText = '0%';
+  statusText.innerText = 'Uploading...';
+
+  try {
+    await api.uploadDocument(kbId, file, (percent) => {
+      bar.style.width = `${percent}%`;
+      percentText.innerText = `${percent}%`;
+    });
+
+    statusText.innerText = 'File saved. Indexing in progress...';
+    setTimeout(() => {
+      card.style.display = 'none';
+      loadDocuments(kbId);
+      showToast('Document uploaded! Indexing started.', 'success');
+    }, 1500);
+  } catch (e) {
+    showToast(e.message, 'error');
+    card.style.display = 'none';
+  }
+}
+
+async function handleKBDelete(kbId) {
+  if (!confirm('This will delete the entire collection and all its vectors. Continue?')) return;
+  try {
+    await api.deleteKB(kbId);
+    showToast('Collection deleted', 'info');
+    navigate('knowledge');
+  } catch (e) { showToast('Delete failed', 'error'); }
+}
+
+async function renderPolicies(container) {
+  container.innerHTML = `
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Safety & Governance</h1>
+        <p class="page-subtitle">Define guardrails to control AI behavior and data access</p>
+      </div>
+      <button class="btn btn-primary" onclick="showPolicyModal()">🛡️ Add Policy</button>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Policy Name</th>
+              <th>Type</th>
+              <th>Description</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="policy-list">
+            <tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-muted);">Loading policies...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Policy Modal -->
+    <div id="policy-modal" class="modal">
+      <div class="modal-content card" style="max-width:500px;">
+        <div class="card-header">🛡️ Define New Policy</div>
+        <div class="card-body">
+          <form id="policy-form" onsubmit="event.preventDefault(); handlePolicyCreate();">
+            <div class="form-group" style="margin-bottom:1.5rem;">
+              <label class="form-label">Policy Name</label>
+              <input type="text" id="policy-name" class="form-input" placeholder="e.g. No PII Data" required>
+            </div>
+            <div class="form-group" style="margin-bottom:1.5rem;">
+              <label class="form-label">Rule Type</label>
+              <select id="policy-type" class="form-select">
+                <option value="compliance">Compliance (Data access rules)</option>
+                <option value="security">Security (Query restrictions)</option>
+                <option value="cleaning">Data Quality (Processing rules)</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin-bottom:1.5rem;">
+              <label class="form-label">Description (The AI Rule)</label>
+              <textarea id="policy-desc" class="form-input" style="min-height:100px;" placeholder="e.g. Never allow the AI to select columns containing SSN, Credit Card info, or personal addresses." required></textarea>
+            </div>
+            <div style="display:flex;gap:1rem;justify-content:flex-end;">
+              <button type="button" class="btn" onclick="closePolicyModal()">Cancel</button>
+              <button type="submit" class="btn btn-primary">Create Policy</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  `;
+  loadPolicies();
+}
+
+async function loadPolicies() {
+  try {
+    const data = await api.listPolicies();
+    const list = document.getElementById('policy-list');
+    if (list && data.policies?.length) {
+      list.innerHTML = data.policies.map(p => `
+        <tr>
+          <td><span style="font-weight:500;">${p.name}</span></td>
+          <td><span class="badge badge-${p.rule_type === 'security' ? 'error' : 'secondary'}">${p.rule_type}</span></td>
+          <td style="color:var(--text-dim);font-size:0.9rem;max-width:300px;">${p.description}</td>
+          <td><button class="btn btn-icon" onclick="handlePolicyDelete('${p.id}')">🗑️</button></td>
+        </tr>
+      `).join('');
+    } else if (list) {
+      list.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:3rem;color:var(--text-muted);">No policies defined yet.</td></tr>';
+    }
+  } catch (e) {
+    showToast('Failed to load policies', 'error');
+  }
+}
+
+async function handlePolicyCreate() {
+  const data = {
+    name: document.getElementById('policy-name').value,
+    rule_type: document.getElementById('policy-type').value,
+    description: document.getElementById('policy-desc').value,
+  };
+  try {
+    await api.createPolicy(data);
+    showToast('Policy active', 'success');
+    closePolicyModal();
+    loadPolicies();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function handlePolicyDelete(id) {
+  if (!confirm('Are you sure you want to remove this guardrail?')) return;
+  try {
+    await api.deletePolicy(id);
+    showToast('Policy removed', 'info');
+    loadPolicies();
+  } catch (e) { showToast('Delete failed', 'error'); }
+}
+
+function showPolicyModal() { document.getElementById('policy-modal').classList.add('open'); }
+function closePolicyModal() { document.getElementById('policy-modal').classList.remove('open'); }
+

@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # ── Upload Limits ─────────────────────────────────────────
-    MAX_UPLOAD_SIZE_MB: int = 50
+    MAX_UPLOAD_SIZE_MB: int = 500
 
     @model_validator(mode="after")
     def _validate_production_secrets(self) -> "Settings":

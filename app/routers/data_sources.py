@@ -13,6 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPExcepti
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure.config import settings
 from app.infrastructure.database.postgres import get_db
 from app.infrastructure.api_dependencies import get_current_user, require_admin
 from app.models.data_source import DataSource

@@ -41,6 +41,7 @@ langchain-groq==0.2.1
 langgraph==0.2.60
 qdrant-client==1.13.2
 fastembed>=0.4.0
+pypdf==5.1.0
 
 # Encryption
 cryptography==44.0.0

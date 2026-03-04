@@ -63,6 +63,7 @@ async def submit_query(
         user_id=current_user.id,
         source_id=body.source_id,
         question=body.question,
+        kb_id=body.kb_id,
         status="pending",
     )
     db.add(job)

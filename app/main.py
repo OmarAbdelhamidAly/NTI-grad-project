@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.infrastructure.config import settings
 from app.infrastructure.middleware import setup_middleware
-from app.routers import auth, users, data_sources, analysis, reports
+from app.routers import auth, users, data_sources, analysis, reports, metrics, knowledge, policies
 
 logger = structlog.get_logger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -50,6 +50,9 @@ def create_app() -> FastAPI:
     app.include_router(data_sources.router)
     app.include_router(analysis.router)
     app.include_router(reports.router)
+    app.include_router(metrics.router)
+    app.include_router(knowledge.router)
+    app.include_router(policies.router)
 
     # Serve static assets (CSS, JS, images)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

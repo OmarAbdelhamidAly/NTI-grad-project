@@ -20,6 +20,10 @@ class AnalysisState(TypedDict, total=False):
     source_type: str             # "csv" | "sql"
     file_path: Optional[str]     # for CSV sources
     config_encrypted: Optional[str]  # for SQL sources
+    business_metrics: Optional[List[Dict[str, str]]]  # List of {name, definition, formula}
+    kb_id: Optional[str]         # UUID of the knowledge base to use for contextual RAG
+    system_policies: Optional[List[Dict[str, str]]]  # List of {name, type, description}
+    policy_violation: Optional[str]  # Error message if a guardrail is triggered
 
     # ── Intake Agent Output ───────────────────────────────────
     intent: str                  # trend | comparison | ranking | correlation | anomaly

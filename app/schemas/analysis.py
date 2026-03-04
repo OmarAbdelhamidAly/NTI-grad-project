@@ -13,6 +13,7 @@ class AnalysisQueryRequest(BaseModel):
     """POST /analysis/query — submit a natural-language question."""
     source_id: uuid.UUID
     question: str = Field(..., min_length=1, max_length=2000)
+    kb_id: Optional[uuid.UUID] = None
 
 
 class AnalysisJobResponse(BaseModel):
@@ -27,6 +28,7 @@ class AnalysisJobResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     retry_count: int = 0
+    kb_id: Optional[uuid.UUID] = None
     error_message: Optional[str] = None
 
     model_config = {"from_attributes": True}

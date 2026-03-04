@@ -21,6 +21,7 @@ from app.modules.sql.agents.analysis_agent import analysis_agent
 from app.modules.sql.agents.visualization_agent import visualization_agent
 from app.modules.sql.agents.insight_agent import insight_agent
 from app.modules.sql.agents.recommendation_agent import recommendation_agent
+from app.modules.shared.agents.guardrail_agent import guardrail_agent
 
 
 # ── Conditional Edge Functions ─────────────────────────────────────────────────
@@ -53,6 +54,7 @@ def build_sql_graph() -> StateGraph:
     graph.add_node("intake", intake_agent)
     graph.add_node("data_discovery", data_discovery_agent)
     graph.add_node("analysis", analysis_agent)
+    graph.add_node("guardrail", guardrail_agent)
     graph.add_node("visualization", visualization_agent)
     graph.add_node("insight", insight_agent)
     graph.add_node("recommendation", recommendation_agent)
@@ -74,9 +76,18 @@ def build_sql_graph() -> StateGraph:
     # data_discovery → analysis (no cleaning step for SQL)
     graph.add_edge("data_discovery", "analysis")
 
-    # analysis → conditional: retry or move to visualization
+    # analysis → guardrail
+    graph.add_edge("analysis", "guardrail")
+
+    # guardrail → conditional: retry or move to visualization
+    def should_retry(state: AnalysisState) -> Literal["retry", "visualize"]:
+        """Route back to analysis on error or policy violation (up to 3 retries)."""
+        if (state.get("error") or state.get("policy_violation")) and state.get("retry_count", 0) <= 3:
+            return "retry"
+        return "visualize"
+
     graph.add_conditional_edges(
-        "analysis",
+        "guardrail",
         should_retry,
         {
             "retry": "analysis",
