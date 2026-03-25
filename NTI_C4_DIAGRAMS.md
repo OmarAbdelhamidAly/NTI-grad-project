@@ -2,32 +2,60 @@
 
 **DataAnalyst.AI — Autonomous Enterprise Data Analyst**
 
+> C4 Model: four levels of zoom — Context → Container → Component → Code.  
+> Each diagram narrows scope. Start at Level 1 for the big picture.
+
 ---
 
 ## Level 1 — System Context
 
-Who uses the system and what external systems does it interact with?
+*Who uses the system, and what external systems does it interact with?*
 
 ```mermaid
 graph TB
-    Admin["👨‍💼 Admin User<br/>Manages tenant, uploads data<br/>approves SQL queries, sets policies"]
-    Viewer["👤 Analyst / Viewer<br/>Asks questions, views insights<br/>exports reports"]
-    DevOps["👨‍💻 DevOps Engineer<br/>Deploys and monitors<br/>the platform"]
+    Admin["👨‍💼 Admin User
+    Connects data sources, approves
+    SQL queries, sets guardrail policies,
+    manages tenant users"]
 
-    System["🤖 DataAnalyst.AI<br/>Autonomous multi-tenant SaaS platform<br/>Turns raw data into executive insights<br/>via multi-agent LangGraph pipelines"]
+    Viewer["👤 Analyst / Viewer
+    Asks natural-language questions,
+    views charts & insights,
+    exports reports"]
 
-    Groq["☁️ Groq API<br/>LLM inference<br/>Llama-3.1-8B + 3.3-70B"]
-    UserDB["🗄️ User's Database<br/>PostgreSQL / MySQL<br/>Enterprise data source"]
+    DevOps["👨‍💻 DevOps Engineer
+    Deploys, monitors, and
+    scales the platform"]
+
+    System["🤖 DataAnalyst.AI
+    Autonomous multi-tenant SaaS platform.
+    Turns raw data into executive insights
+    via multi-agent LangGraph pipelines.
+    Supports CSV, SQL, JSON, and PDF."]
+
+    Groq["☁️ Groq API
+    LLM inference
+    Llama-3.1-8B + 3.3-70B"]
+
+    UserDB["🗄️ User's Database
+    PostgreSQL / MySQL
+    Enterprise data source"]
+
+    Qdrant["🔍 Qdrant
+    Vector database
+    (optional cloud mode)"]
 
     Admin  -->|"HTTPS — manage, approve, configure"| System
     Viewer -->|"HTTPS — query, view, export"| System
-    DevOps -->|"Docker / K8s / CLI"| System
-    System -->|"LLM completions"| Groq
+    DevOps -->|"Docker / K8s / Prometheus"| System
+    System -->|"LLM completions (HTTPS)"| Groq
     System -->|"Read-only SELECT queries"| UserDB
+    System -->|"Vector upsert + search"| Qdrant
 
     style System fill:#1F3864,color:#fff,stroke:#2E5B8A
     style Groq   fill:#2E5B8A,color:#fff,stroke:#4472C4
     style UserDB fill:#2E5B8A,color:#fff,stroke:#4472C4
+    style Qdrant fill:#2E5B8A,color:#fff,stroke:#4472C4
     style Admin  fill:#D5E8F0,color:#1F3864,stroke:#2E5B8A
     style Viewer fill:#D5E8F0,color:#1F3864,stroke:#2E5B8A
     style DevOps fill:#D5E8F0,color:#1F3864,stroke:#2E5B8A
@@ -37,368 +65,504 @@ graph TB
 
 ## Level 2 — Container Diagram
 
-What are the deployable units and how do they communicate?
+*What are the deployable units, and how do they communicate?*
 
 ```mermaid
 graph TB
     User["👤 User / Admin"]
 
     subgraph Docker ["🐳 Docker Compose Network"]
-        UI["🖥️ Glassmorphism SPA<br/>Vanilla JS + Plotly.js<br/>Served from api/app/static/"]
+        UI["🖥️ Glassmorphism SPA
+        Vanilla JS + Plotly.js
+        Served from api/app/static/"]
 
-        API["🔀 API Gateway<br/>FastAPI · asyncpg · :8002<br/>JWT auth · AES-256 encryption<br/>Rate limiting · Security headers"]
+        ReactUI["⚛️ React + TypeScript SPA
+        Vite · Component-based UI
+        Plotly.js charts · frontend/"]
+
+        API["🔀 API Gateway
+        FastAPI · asyncpg · :8002
+        JWT auth · AES-256 encryption
+        Rate limiting · Security headers"]
 
         subgraph Workers ["⚙️ Celery Workers"]
-            Gov["🛡️ Governance<br/>queue: governance<br/>intake + guardrail agents"]
-            SQL["🗃️ worker-sql<br/>queue: pillar.sql<br/>11-node LangGraph pipeline"]
-            CSV["📊 worker-csv<br/>queue: pillar.csv<br/>7-node LangGraph pipeline"]
-            Other["📄 worker-json<br/>worker-pdf<br/>exporter"]
+            Gov["🛡️ Governance
+            queue: governance
+            intake + guardrail agents"]
+
+            SQL["🗃️ worker-sql
+            queue: pillar.sql/.sqlite/.postgresql
+            11-node LangGraph pipeline"]
+
+            CSV["📊 worker-csv
+            queue: pillar.csv
+            7-node LangGraph pipeline"]
+
+            Other["📄 worker-json · worker-pdf
+            exporter
+            pillar.json · pillar.pdf · export"]
         end
 
         subgraph Storage ["💾 Storage Layer"]
-            PG["PostgreSQL :5433<br/>Tenants · Users · Jobs<br/>Results · Policies"]
-            Redis["Redis :6379<br/>Celery broker<br/>JWT blacklist<br/>LangGraph checkpoints"]
-            Qdrant["Qdrant :6333<br/>PDF vector store<br/>ColPali multi-vector"]
-            Vol["Shared Volume<br/>Uploaded files<br/>Exported reports"]
+            PG["PostgreSQL :5433
+            Tenants · Users · Jobs
+            Results · Policies
+            Insight Memory"]
+
+            Redis["Redis :6379
+            Celery broker
+            JWT blacklist
+            LangGraph checkpoints (HITL)"]
+
+            QdrantLocal["Qdrant :6333
+            PDF vector store
+            ColPali multi-vector"]
+
+            Vol["Shared Volume
+            Uploaded CSV/PDF files
+            Exported PDF/XLSX reports"]
+        end
+
+        subgraph Observability ["📈 Observability"]
+            Prom["Prometheus :9090
+            Metrics collection"]
+            Graf["Grafana :3000
+            Pre-provisioned dashboards"]
         end
     end
 
     Groq["☁️ Groq API"]
 
-    User   -->|"HTTPS"| UI
-    User   -->|"REST"| API
-    UI     -->|"fetch"| API
-    API    -->|"Celery task"| Redis
-    Redis  -->|"task dispatch"| Gov
-    Gov    -->|"Celery task"| Redis
-    Redis  -->|"task dispatch"| SQL
-    Redis  -->|"task dispatch"| CSV
-    Redis  -->|"task dispatch"| Other
-    API    -->|"asyncpg"| PG
-    SQL    -->|"asyncpg"| PG
-    CSV    -->|"asyncpg"| PG
-    SQL    -->|"LangGraph state"| Redis
-    SQL    -->|"HTTPS"| Groq
-    CSV    -->|"HTTPS"| Groq
-    Gov    -->|"HTTPS"| Groq
-    SQL    -->|"vectors"| Qdrant
-    API    -->|"file I/O"| Vol
+    User    -->|"HTTPS"| UI
+    User    -->|"HTTPS"| ReactUI
+    UI      -->|"fetch REST"| API
+    ReactUI -->|"fetch REST"| API
+    API     -->|"Celery task dispatch"| Redis
+    Redis   -->|"task pickup"| Gov
+    Gov     -->|"Celery task dispatch"| Redis
+    Redis   -->|"task pickup"| SQL
+    Redis   -->|"task pickup"| CSV
+    Redis   -->|"task pickup"| Other
+    API     -->|"asyncpg SQL"| PG
+    SQL     -->|"asyncpg SQL"| PG
+    CSV     -->|"asyncpg SQL"| PG
+    SQL     -->|"LangGraph state (HITL)"| Redis
+    SQL     -->|"vector search"| QdrantLocal
+    Other   -->|"vector upsert"| QdrantLocal
+    API     -->|"LLM calls"| Groq
+    Gov     -->|"LLM calls"| Groq
+    SQL     -->|"LLM calls"| Groq
+    CSV     -->|"LLM calls"| Groq
+    API     -->|"file I/O"| Vol
+    Other   -->|"file I/O"| Vol
+    API     -->|"expose /metrics"| Prom
+    Prom    -->|"data source"| Graf
 
-    style API   fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style SQL   fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style CSV   fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style Gov   fill:#C55A11,color:#fff,stroke:#843C0C
-    style Groq  fill:#2E5B8A,color:#fff,stroke:#4472C4
-    style Redis fill:#DC382D,color:#fff,stroke:#9E1C1C
-    style PG    fill:#336791,color:#fff,stroke:#1F4060
-    style Qdrant fill:#2E5B8A,color:#fff,stroke:#4472C4
+    style API fill:#1F6B4E,color:#fff
+    style Redis fill:#DC382D,color:#fff
+    style PG fill:#336791,color:#fff
+    style QdrantLocal fill:#4F46E5,color:#fff
 ```
 
 ---
 
 ## Level 3 — Component Diagram: API Gateway
 
+*What are the major components inside the API Gateway container?*
+
 ```mermaid
-graph TB
-    Client["👤 Client"]
+graph LR
+    Client["Browser / API Client"]
 
-    subgraph API ["🔀 services/api — FastAPI Gateway :8002"]
-        Main["app/main.py<br/>App factory + self-healing<br/>DB migration on startup"]
+    subgraph API ["services/api — FastAPI :8002"]
+        MW["Middleware Stack
+        CORS · Rate Limit (slowapi)
+        Security Headers · structlog"]
 
-        subgraph Routers ["📡 Routers"]
-            Auth["routers/auth.py<br/>register · login · refresh · logout<br/>JWT rotation + Redis revocation"]
-            DS["routers/data_sources.py<br/>upload CSV/XLSX/SQLite<br/>connect SQL (AES-256 encrypted)<br/>auto schema profiling"]
-            Analysis["routers/analysis.py<br/>submit query · poll status<br/>approve HITL · fetch result"]
-            Other["routers/users.py<br/>routers/knowledge.py<br/>routers/policies.py<br/>routers/metrics.py<br/>routers/reports.py"]
+        subgraph Routers ["Routers"]
+            AuthR["auth.py
+            register · login
+            refresh · logout"]
+
+            DSR["data_sources.py
+            upload · connect
+            list · delete
+            auto-analysis"]
+
+            AnalR["analysis.py
+            query · status
+            approve · reject
+            result"]
+
+            KnowR["knowledge.py
+            upload PDF
+            list · delete"]
+
+            PolR["policies.py
+            create · list
+            update · delete"]
+
+            MetR["metrics.py
+            summary · jobs"]
+
+            RepR["reports.py
+            export · status
+            download"]
         end
 
-        subgraph Infra ["🔒 Infrastructure"]
-            Sec["security.py<br/>JWT access (30min)<br/>JWT refresh (7 days)<br/>bcrypt passwords"]
-            Guard["sql_guard.py<br/>Layer 1: SELECT-only<br/>Layer 2: keyword blocklist<br/>Layer 3: LLM policy"]
-            MW["middleware.py<br/>CORS · rate limiting<br/>security headers<br/>request logging"]
-            Enc["adapters/encryption.py<br/>AES-256-GCM<br/>SQL credential encryption"]
-            BL["token_blacklist.py<br/>Redis JTI revocation<br/>instant logout enforcement"]
+        subgraph Infra ["Infrastructure"]
+            Sec["security.py
+            JWT issue/verify
+            bcrypt · JTI blacklist"]
+
+            Guard["sql_guard.py
+            Layer 1: SELECT-only
+            Layer 2: keyword regex"]
+
+            Enc["encryption.py
+            AES-256-GCM
+            encrypt/decrypt creds"]
+
+            QdrantA["qdrant.py
+            multi-vector upsert
+            similarity search"]
+
+            StorA["storage.py
+            tenant-scoped paths
+            file read/write"]
         end
 
-        Worker["app/worker.py<br/>Celery task definitions<br/>governance_task · pillar_task"]
+        subgraph UC ["Use Cases"]
+            Pipeline["run_pipeline.py
+            Celery dispatch
+            governance → pillar"]
+
+            AutoA["auto_analysis.py
+            5 pre-generated insights
+            on data source upload"]
+
+            Export["export.py
+            Celery dispatch
+            exporter queue"]
+        end
+
+        Static["static/
+        Glassmorphism SPA
+        HTML + CSS + JS"]
     end
 
     PG["PostgreSQL"]
     Redis["Redis"]
 
-    Client --> Auth & DS & Analysis & Other
-    Main --> Routers
-    Auth --> Sec & BL
-    DS --> Enc
-    Analysis --> Guard & Worker
-    Worker -->|"Celery"| Redis
-    Routers -->|"asyncpg"| PG
+    Client --> MW --> Routers
+    AuthR --> Sec
+    AuthR --> PG
+    DSR --> Enc
+    DSR --> StorA
+    DSR --> AutoA
+    AnalR --> Guard
+    AnalR --> Pipeline
+    AnalR --> PG
+    KnowR --> QdrantA
+    RepR --> Export
+    Pipeline --> Redis
+    AutoA --> Redis
+    Export --> Redis
+    Sec --> Redis
 
-    style Auth     fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style Guard    fill:#C55A11,color:#fff,stroke:#843C0C
-    style Enc      fill:#C55A11,color:#fff,stroke:#843C0C
-    style BL       fill:#C55A11,color:#fff,stroke:#843C0C
+    style MW fill:#FF6B35,color:#fff
+    style Guard fill:#E74C3C,color:#fff
+    style Enc fill:#8E44AD,color:#fff
 ```
 
 ---
 
 ## Level 3 — Component Diagram: SQL Worker
 
+*What are the major components inside the SQL analysis worker?*
+
 ```mermaid
-graph TB
-    subgraph SQLWorker ["🗃️ services/worker-sql — LangGraph SQL Pipeline"]
-        subgraph Graph ["🔄 modules/sql/workflow.py"]
-            DD["data_discovery<br/>Schema compression<br/>FK inference<br/>ERD generation"]
-            AG["analysis_generator<br/>ReAct agent<br/>Golden SQL examples<br/>ANSI SELECT generation"]
-            HA["human_approval<br/>HITL interrupt<br/>Redis checkpoint"]
-            EX["execution<br/>Run approved SQL<br/>Zero-row reflection"]
-            BT["backtrack<br/>Failure analysis<br/>Hint injection"]
-            HF["hybrid_fusion<br/>Qdrant KB context<br/>PDF knowledge enrichment"]
-            VIZ["visualization<br/>Plotly chart JSON<br/>Auto chart type selection"]
-            INS["insight<br/>Executive summary<br/>Data-grounded narrative"]
-            VER["verifier<br/>Quality gate<br/>Insight vs data check"]
-            REC["recommendation<br/>3 actionable next steps"]
-            MEM["memory_persistence<br/>Save to insight_memory<br/>Golden SQL examples"]
-            OA["output_assembler<br/>Final JSON result<br/>DB persistence"]
+graph TD
+    Celery["Celery Task Entry
+    queue: pillar.sql"]
+
+    subgraph SQLWorker ["services/worker-sql — LangGraph Pipeline"]
+        WF["workflow.py
+        LangGraph StateGraph
+        AsyncRedisSaver checkpointer"]
+
+        subgraph Agents ["Agents (11 nodes)"]
+            DD["data_discovery
+            Schema profiling
+            low-cardinality sampling
+            ERD generation"]
+
+            AG["analysis_generator
+            ReAct agent
+            golden SQL retrieval
+            ANSI SELECT generation"]
+
+            HA["human_approval
+            INTERRUPT node
+            state serialized to Redis
+            waits for admin POST /approve"]
+
+            EX["execution
+            Live SQL run (≤1,000 rows)
+            row_count capture"]
+
+            BK["backtrack
+            Zero-row reflection
+            Case mismatch detection
+            Retry hint injection"]
+
+            HF["hybrid_fusion
+            Qdrant multi-vector search
+            PDF context enrichment"]
+
+            VZ["visualization
+            Plotly JSON spec
+            bar/line/scatter/pie"]
+
+            IN["insight
+            3–5 sentence summary
+            grounded in row values"]
+
+            VR["verifier
+            Quality gate
+            insight vs data check"]
+
+            RC["recommendation
+            3 action items
+            intent-aware"]
+
+            MP["memory_persistence
+            golden SQL save
+            insight_memory table"]
         end
 
-        subgraph Tools ["🔧 Tools"]
-            RunSQL["run_sql_query<br/>Async DB execution<br/>1000 row limit"]
-            SSD["sql_schema_discovery<br/>Table profiling<br/>Sample values"]
+        subgraph Tools ["Tools"]
+            RunSQL["run_sql_query
+            dry-run + live mode
+            row count + snapshot"]
+
+            SchDisc["sql_schema_discovery
+            table profiling
+            sample value extraction"]
         end
 
-        subgraph Utils ["📚 Utils"]
-            GS["golden_sql<br/>Few-shot SQL examples"]
-            IM["insight_memory<br/>Successful analysis cache"]
-            SM["schema_mapper<br/>Column type normalization"]
-            SS["schema_selector<br/>Token-budget schema compression"]
-            SV["sql_validator<br/>EXPLAIN cost analysis"]
+        subgraph Utils ["Utils"]
+            GS["golden_sql
+            retrieve similar
+            past question→SQL pairs"]
+
+            IM["insight_memory
+            save/retrieve
+            embeddings for similarity"]
+
+            SM["schema_mapper
+            column type normalization
+            FK/PK detection"]
+
+            SS["schema_selector
+            compress schema to
+            relevant tables only"]
+
+            SV["sql_validator
+            syntax pre-check
+            before LLM routing"]
         end
+
+        OA["output_assembler
+        Final JSON build
+        PostgreSQL write
+        job status → done"]
     end
 
-    DD --> AG --> HA --> EX
-    EX -->|"0 rows"| BT --> AG
-    EX -->|"success"| HF --> VIZ --> INS --> VER --> REC --> MEM --> OA
-    AG --> RunSQL & SSD
-    AG --> GS & SS & SM
-    VER --> SV
-    MEM --> IM
+    Redis["Redis
+    HITL checkpoint storage"]
 
-    style AG  fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style HA  fill:#C55A11,color:#fff,stroke:#843C0C
-    style BT  fill:#C55A11,color:#fff,stroke:#843C0C
-    style EX  fill:#375623,color:#fff,stroke:#255E1E
+    Groq["Groq API
+    LLM inference"]
+
+    PG["PostgreSQL
+    AnalysisResult write"]
+
+    Celery --> WF
+    WF --> DD --> AG
+    AG --> HA -->|"resume on approve"| EX
+    AG -->|"auto_analysis"| EX
+    EX -->|"row_count=0"| BK --> AG
+    EX -->|"success"| HF --> VZ --> IN --> VR --> RC --> MP --> OA
+    WF <-->|"state checkpoint"| Redis
+    AG --> Groq
+    IN --> Groq
+    VR --> Groq
+    RC --> Groq
+    RunSQL -.-> EX
+    SchDisc -.-> DD
+    GS -.-> AG
+    IM -.-> MP
+    OA --> PG
+
+    style HA fill:#FF6B35,color:#fff
+    style BK fill:#E74C3C,color:#fff
+    style VR fill:#27AE60,color:#fff
 ```
 
 ---
 
 ## Level 3 — Component Diagram: Governance Worker
 
+*What are the components inside the Governance worker?*
+
 ```mermaid
-graph TB
-    subgraph Gov ["🛡️ services/governance — Policy Enforcement"]
-        subgraph GovGraph ["🔄 modules/governance/workflow.py"]
-            IA["intake_agent<br/>Classify intent<br/>Extract entities<br/>Detect ambiguity"]
-            GA["guardrail_agent<br/>Check admin policies<br/>PII detection<br/>LLM-based evaluation"]
+graph LR
+    Celery["Celery Task
+    queue: governance"]
+
+    subgraph GovWorker ["services/governance — LangGraph Pipeline"]
+        WF["workflow.py
+        2-node LangGraph StateGraph"]
+
+        subgraph Agents ["Agents"]
+            IA["intake_agent
+            Intent classification:
+            trend | comparison | ranking
+            correlation | anomaly
+            Entity extraction
+            Ambiguity detection
+            Complexity index (1–5)"]
+
+            GA["guardrail_agent
+            Load tenant active policies
+            LLM semantic policy check
+            PII column detection
+            Violation → error status"]
         end
 
-        Policies["Admin-defined rules<br/>e.g. never expose salary data<br/>never query audit logs"]
+        Router["check_intake
+        needs_clarification?
+        → ask user to rephrase
+        OR route to guardrail"]
     end
 
-    Redis["Redis — receives governance task"]
-    Pillar["Redis — dispatches to pillar queue"]
+    PillarQ["Redis
+    → pillar.sql / csv / json / pdf
+    Celery task dispatch"]
 
-    Redis --> IA
-    IA -->|"clarification needed"| Done["Job: awaiting_clarification"]
-    IA --> GA
-    GA --> Policies
-    GA -->|"policy violation"| Reject["Job: error (policy blocked)"]
-    GA -->|"approved"| Pillar
+    Groq["Groq API"]
+    PG["PostgreSQL
+    Tenant policies
+    Job status update"]
 
-    style GA   fill:#C55A11,color:#fff,stroke:#843C0C
-    style Reject fill:#A32D2D,color:#fff,stroke:#701F1F
-    style Done fill:#2E5B8A,color:#fff,stroke:#4472C4
+    Celery --> WF
+    WF --> IA --> Router
+    Router -->|"clear"| GA --> PillarQ
+    Router -->|"ambiguous"| PG
+    IA --> Groq
+    GA --> Groq
+    GA --> PG
+
+    style GA fill:#E74C3C,color:#fff
+    style Router fill:#FF6B35,color:#fff
 ```
 
 ---
 
-## Level 4 — Code: Key Classes
+## Level 4 — Code Diagram: HITL Sequence
+
+*How does Human-in-the-Loop approval work at the code level?*
 
 ```mermaid
-classDiagram
-    class AnalysisJob {
-        +UUID id
-        +UUID tenant_id
-        +UUID user_id
-        +UUID source_id
-        +str question
-        +str intent
-        +str status
-        +str generated_sql
-        +list thinking_steps
-        +int complexity_index
-        +int retry_count
-        +UUID kb_id
-    }
+sequenceDiagram
+    participant Client
+    participant API as API Gateway
+    participant Redis
+    participant SQLWorker as SQL Worker (LangGraph)
+    participant Admin
 
-    class DataSource {
-        +UUID id
-        +UUID tenant_id
-        +str type
-        +str name
-        +str file_path
-        +str config_encrypted
-        +dict schema_json
-        +str auto_analysis_status
-        +dict auto_analysis_json
-        +str domain_type
-    }
+    Client->>API: POST /analysis/query {question}
+    API->>Redis: Dispatch governance_task
+    Redis->>SQLWorker: Pick up task (eventually routed to SQL worker)
+    SQLWorker->>SQLWorker: data_discovery → analysis_generator
+    Note over SQLWorker: Generates SQL query
+    SQLWorker->>Redis: Serialize full graph state (AsyncRedisSaver)
+    Note over Redis: State key: checkpoint:{job_id}
+    SQLWorker->>SQLWorker: INTERRUPT fires at human_approval node
+    SQLWorker-->>API: Update job: status=awaiting_approval, generated_sql=...
+    SQLWorker->>SQLWorker: Task exits cleanly
 
-    class Tenant {
-        +UUID id
-        +str name
-        +str plan
-    }
+    Client->>API: GET /analysis/{job_id}
+    API-->>Client: { status: "awaiting_approval", generated_sql: "SELECT..." }
 
-    class User {
-        +UUID id
-        +UUID tenant_id
-        +str email
-        +str password_hash
-        +str role
-    }
+    Admin->>API: POST /analysis/{job_id}/approve
+    API->>Redis: Patch state: { approval_granted: true }
+    API->>Redis: Dispatch pillar_task (resume)
+    Redis->>SQLWorker: Pick up task
 
-    class AnalysisState {
-        +str question
-        +str source_id
-        +str connection_string
-        +dict schema_summary
-        +str generated_sql
-        +dict analysis_results
-        +list charts
-        +str insight_report
-        +list recommendations
-        +str reflection_context
-        +int reflection_count
-        +int retry_count
-        +bool approval_granted
-    }
+    SQLWorker->>Redis: Load state from checkpoint
+    Note over SQLWorker: Graph resumes from human_approval node
+    SQLWorker->>SQLWorker: execution → hybrid_fusion → visualization → insight → ...
+    SQLWorker-->>API: Update job: status=done, write AnalysisResult
 
-    class Settings {
-        +str ENV
-        +str DATABASE_URL
-        +str REDIS_URL
-        +str SECRET_KEY
-        +str AES_KEY
-        +str GROQ_API_KEY
-        +str LLM_MODEL
-        +validate_production_secrets()
-    }
-
-    Tenant "1" --> "many" User : has
-    Tenant "1" --> "many" DataSource : owns
-    User "1" --> "many" AnalysisJob : submits
-    DataSource "1" --> "many" AnalysisJob : analyzed by
-    AnalysisJob --> AnalysisState : creates state
+    Client->>API: GET /analysis/{job_id}/result
+    API-->>Client: { charts, insight, recommendations }
 ```
 
 ---
 
-## LangGraph SQL Pipeline Flow
+## Level 4 — Code Diagram: Zero-Row Reflection
+
+*How does the agent heal itself when a SQL query returns no results?*
 
 ```mermaid
-flowchart TD
-    Start([Job dispatched to worker-sql]) --> DD
+sequenceDiagram
+    participant Gen as analysis_generator
+    participant Exec as execution
+    participant Router as route_after_execution
+    participant Back as backtrack
+    participant State as LangGraph State
 
-    DD["data_discovery<br/>Schema compression + FK inference + ERD"]
-    AG["analysis_generator<br/>ReAct: SQL generation with golden examples"]
-    HA["human_approval<br/>HITL INTERRUPT — Redis checkpoint"]
-    EX["execution<br/>Run SQL against live database"]
-    BT["backtrack<br/>Analyze failure + inject hint"]
-    HF["hybrid_fusion<br/>Fetch Qdrant PDF context"]
-    VIZ["visualization<br/>Generate Plotly charts"]
-    INS["insight<br/>Executive summary"]
-    VER["verifier<br/>Quality gate"]
-    REC["recommendation<br/>3 action items"]
-    MEM["memory_persistence<br/>Save to insight memory"]
-    OA["output_assembler<br/>Save result to PostgreSQL"]
-    End([Job status: done])
+    Gen->>State: Write generated_sql = "SELECT ... WHERE quarter = 'q4'"
+    Gen->>Exec: Route → execution
+    Exec->>Exec: Run SQL against live DB
+    Exec->>State: Write row_count = 0, reflection_context = null
 
-    DD --> AG
+    Exec->>Router: route_after_execution()
+    Router->>State: Read row_count = 0
+    Note over Router: row_count = 0 → reflection path
+    Router->>State: Extract SQL literals: ["q4"]
+    Router->>State: Compare against schema low_cardinality_values: quarter=["Q1","Q2","Q3","Q4"]
+    Router->>State: Write reflection_context = "Case mismatch: 'q4' should be 'Q4'"
+    Router->>Back: Route → backtrack
 
-    AG -->|"user_id = auto_analysis\nOR approval_granted = True"| EX
-    AG -->|"normal user"| HA
-    HA -->|"Admin approves via UI"| EX
+    Back->>State: Read reflection_context
+    Back->>State: Write hint = "User used lowercase 'q4'; correct value is 'Q4'. Retry with exact case."
+    Back->>State: Increment retry_count (now 1 of 3)
+    Back->>Gen: Route → analysis_generator (retry)
 
-    EX -->|"row_count = 0\nreflection_count < 1"| BT
-    BT -->|"inject case hint\nincrement retry"| AG
-    EX -->|"success"| HF
-
-    HF --> VIZ --> INS --> VER --> REC --> MEM --> OA --> End
-
-    style AG  fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style HA  fill:#C55A11,color:#fff,stroke:#843C0C
-    style BT  fill:#C55A11,color:#fff,stroke:#843C0C
-    style EX  fill:#375623,color:#fff,stroke:#255E1E
-    style End fill:#375623,color:#fff,stroke:#255E1E
+    Gen->>Gen: Incorporate hint from state
+    Gen->>State: Write generated_sql = "SELECT ... WHERE quarter = 'Q4'"
+    Gen->>Exec: Route → execution
+    Exec->>Exec: Run SQL against live DB
+    Exec->>State: Write row_count = 5 ✓
+    Exec->>Router: route_after_execution()
+    Router->>Router: row_count > 0 → success path
+    Router->>Router: Route → hybrid_fusion
 ```
 
 ---
 
-## CSV Pipeline Flow
+## Architecture Decision Records (ADR)
 
-```mermaid
-flowchart TD
-    Start([Job dispatched to worker-csv]) --> DD
-
-    DD["data_discovery<br/>Profile DataFrame: dtypes, nulls,<br/>uniques, quality score"]
-    DC["data_cleaning<br/>Null imputation, type coercion,<br/>outlier flagging"]
-    AN["analysis<br/>Pandas query execution<br/>Statistical analysis"]
-    VIZ["visualization<br/>Plotly charts"]
-    INS["insight<br/>Executive summary"]
-    REC["recommendation<br/>Action items"]
-    OA["output_assembler<br/>Final result"]
-    End([Job status: done])
-
-    DD -->|"quality_score < 0.9"| DC
-    DD -->|"quality_score >= 0.9"| AN
-    DC --> AN
-    AN --> VIZ --> INS --> REC --> OA --> End
-
-    style AN  fill:#1F3864,color:#fff,stroke:#2E5B8A
-    style DC  fill:#C55A11,color:#fff,stroke:#843C0C
-    style End fill:#375623,color:#fff,stroke:#255E1E
-```
-
----
-
-## Security Architecture
-
-```mermaid
-graph TB
-    subgraph Auth ["🔐 JWT Authentication Flow"]
-        Login["POST /auth/login"] -->|"access_token 30min<br/>refresh_token 7 days"| Client
-        Client -->|"Authorization: Bearer"| Protected["Protected Endpoint"]
-        Protected --> Verify["Verify signature<br/>Check expiry<br/>Extract tenant_id + role"]
-        Expired["Token expired"] -->|"POST /auth/refresh"| Rotate["Revoke old JTI<br/>Issue new token pair"]
-        Logout["POST /auth/logout"] --> Revoke["Delete JTI from Redis<br/>Token dead immediately"]
-    end
-
-    subgraph Guard ["🛡️ SQL Security Layers"]
-        L1["Layer 1: Regex<br/>SELECT or WITH only<br/>No DROP DELETE INSERT..."]
-        L2["Layer 2: Keyword scan<br/>TRUNCATE EXEC GRANT...<br/>Anywhere in query"]
-        L3["Layer 3: LLM Guardrail<br/>Admin policy enforcement<br/>PII semantic detection"]
-        L1 --> L2 --> L3 -->|"approved"| Execute["Execute against DB"]
-        L1 -->|"blocked"| Reject1["ValueError: not SELECT"]
-        L2 -->|"blocked"| Reject2["ValueError: forbidden keyword"]
-        L3 -->|"blocked"| Reject3["Policy violation: job rejected"]
-    end
-
-    style L1 fill:#C55A11,color:#fff
-    style L2 fill:#C55A11,color:#fff
-    style L3 fill:#A32D2D,color:#fff
-    style Execute fill:#375623,color:#fff
-    style Reject1 fill:#A32D2D,color:#fff
-    style Reject2 fill:#A32D2D,color:#fff
-    style Reject3 fill:#A32D2D,color:#fff
-```
+| Decision | Choice | Rejected Alternatives | Rationale |
+|---|---|---|---|
+| Inter-service communication | Celery + Redis queues | Direct HTTP, gRPC | Decoupling — API works even when workers are restarting |
+| HITL state persistence | Redis (AsyncRedisSaver) | PostgreSQL, in-memory | Survives worker restart; Redis is already in the stack |
+| LLM provider | Groq (Llama) | OpenAI GPT-4, Claude | Sub-second inference latency; cost; LangChain abstraction enables easy swap |
+| PDF embedding strategy | ColPali multi-vector | Text-only chunking | Preserves visual layout, tables, and charts; no text extraction required |
+| Credential encryption | AES-256-GCM in DB | AWS Secrets Manager | Zero external dependencies; clear migration path to secrets manager |
+| Tenant isolation | Shared DB + tenant_id | One DB per tenant | Simpler ops at NTI-project scale; equivalent isolation guarantee |
+| Frontend | Vanilla JS SPA + React/TS | Angular, Vue | Vanilla for zero-build-step demo; React for production component reuse |
+| Observability | Prometheus + Grafana | Datadog, New Relic | Self-hosted; zero cost; provisioned automatically |

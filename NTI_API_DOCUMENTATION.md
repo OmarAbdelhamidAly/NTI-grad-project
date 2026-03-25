@@ -1,11 +1,12 @@
 # 📡 API Documentation
 
-**DataAnalyst.AI — Autonomous Enterprise Data Analyst**
+**DataAnalyst.AI — Autonomous Enterprise Data Analyst**  
 Base URL: `http://localhost:8002/api/v1`
 
-All endpoints accept and return `application/json` unless noted. Protected endpoints require `Authorization: Bearer {access_token}`.
+All endpoints accept and return `application/json` unless noted.  
+Protected endpoints require `Authorization: Bearer {access_token}`.
 
-API docs (Swagger UI) available at `http://localhost:8002/docs` in development mode. Hidden in production (`ENV=production`).
+> **Interactive docs (Swagger UI):** `http://localhost:8002/docs` — available in `development` mode only. Hidden in production (`ENV=production`).
 
 ---
 
@@ -22,6 +23,7 @@ API docs (Swagger UI) available at `http://localhost:8002/docs` in development m
 9. [Health](#9-health)
 10. [Error Responses](#10-error-responses)
 11. [Role-Based Access](#11-role-based-access)
+12. [Rate Limits Reference](#12-rate-limits-reference)
 
 ---
 
@@ -29,7 +31,7 @@ API docs (Swagger UI) available at `http://localhost:8002/docs` in development m
 
 ### POST /auth/register
 
-Create a new tenant and its first admin user.
+Create a new tenant and its first admin user in a single step.
 
 **Rate limit:** 3 requests / minute per IP
 
@@ -58,6 +60,8 @@ Create a new tenant and its first admin user.
 }
 ```
 
+**Errors:** `400` — Email already registered | `422` — Validation error
+
 ---
 
 ### POST /auth/login
@@ -76,14 +80,13 @@ Authenticate and receive JWT token pair.
 
 **Response `200`:** Same structure as `/register`.
 
-**Errors:**
-- `401` — Invalid email or password
+**Errors:** `401` — Invalid credentials
 
 ---
 
 ### POST /auth/refresh
 
-Exchange a refresh token for a new token pair. The old refresh token is immediately revoked (rotation).
+Exchange a refresh token for a new token pair. The old refresh token is immediately revoked (rotation prevents token reuse attacks).
 
 **Request:**
 ```json
@@ -94,14 +97,13 @@ Exchange a refresh token for a new token pair. The old refresh token is immediat
 
 **Response `200`:** New `access_token` + `refresh_token`.
 
-**Errors:**
-- `401` — Expired, invalid, or already-revoked refresh token
+**Errors:** `401` — Expired, invalid, or already-revoked refresh token
 
 ---
 
 ### POST /auth/logout
 
-Revoke the refresh token immediately. The access token expires naturally after 30 minutes.
+**Protected.** Revoke the current refresh token. JTI is added to Redis blacklist — token is dead immediately, before natural expiry.
 
 **Request:**
 ```json
@@ -110,7 +112,10 @@ Revoke the refresh token immediately. The access token expires naturally after 3
 }
 ```
 
-**Response `204`:** No content.
+**Response `200`:**
+```json
+{ "message": "Logged out successfully" }
+```
 
 ---
 
@@ -118,19 +123,17 @@ Revoke the refresh token immediately. The access token expires naturally after 3
 
 ### GET /users/me
 
-Get the current authenticated user's profile.
-
-**Headers:** `Authorization: Bearer {access_token}`
+**Protected.** Return the authenticated user's profile.
 
 **Response `200`:**
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "id": "550e8400-...",
   "email": "admin@acme.com",
   "role": "admin",
-  "tenant_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "tenant_id": "7c9e6679-...",
   "created_at": "2025-03-16T10:00:00Z",
-  "last_login": "2025-03-16T12:30:00Z"
+  "last_login": "2025-03-20T08:30:00Z"
 }
 ```
 
@@ -138,7 +141,7 @@ Get the current authenticated user's profile.
 
 ### POST /users/invite
 
-**Admin only.** Invite a new user to the tenant.
+**Protected · Admin only.** Invite a viewer user to the tenant. Creates the user and returns credentials.
 
 **Request:**
 ```json
@@ -148,23 +151,23 @@ Get the current authenticated user's profile.
 }
 ```
 
-**Response `201`:** New user object with temporary password.
+**Response `201`:**
+```json
+{
+  "id": "...",
+  "email": "analyst@acme.com",
+  "role": "viewer",
+  "tenant_id": "..."
+}
+```
 
 ---
 
 ### GET /users
 
-**Admin only.** List all users in the tenant.
+**Protected · Admin only.** List all users in the tenant.
 
-**Response `200`:**
-```json
-{
-  "users": [
-    {"id": "...", "email": "admin@acme.com", "role": "admin", ...},
-    {"id": "...", "email": "analyst@acme.com", "role": "viewer", ...}
-  ]
-}
-```
+**Response `200`:** Array of user objects.
 
 ---
 
@@ -172,80 +175,83 @@ Get the current authenticated user's profile.
 
 ### POST /data-sources/upload
 
-Upload a CSV, XLSX, or SQLite file. Triggers automatic schema profiling and background auto-analysis.
+**Protected.** Upload a CSV, XLSX, or SQLite file. Triggers automatic schema profiling and background auto-analysis (5 pre-generated insights).
 
-**Headers:** `Authorization: Bearer {access_token}` + `Content-Type: multipart/form-data`
-
-**Form fields:**
-- `file` (required) — The file to upload
-- `name` (required) — Display name for the data source
+**Request:** `multipart/form-data`
+- `file` — The data file
+- `name` — Human-readable display name
+- `domain_type` (optional) — `"sales" | "hr" | "finance" | "inventory" | "customer"`
 
 **Response `201`:**
 ```json
 {
-  "id": "a3f8b2c1-...",
-  "type": "csv",
+  "id": "ds-uuid",
   "name": "Q4 Sales Data",
+  "type": "csv",
+  "domain_type": "sales",
   "schema_json": {
-    "columns": [
-      {
-        "name": "revenue",
-        "dtype": "float64",
-        "null_count": 0,
-        "unique_count": 847,
-        "sample_values": [12500.0, 8300.0, 15200.0]
-      }
-    ],
-    "row_count": 5000,
-    "column_count": 12
+    "columns": ["product", "revenue", "quarter"],
+    "dtypes": {"product": "object", "revenue": "float64", "quarter": "object"},
+    "row_count": 12450,
+    "sample_values": {"quarter": ["Q1", "Q2", "Q3", "Q4"]}
   },
   "auto_analysis_status": "pending",
-  "domain_type": "sales",
-  "created_at": "2025-03-16T10:05:00Z"
+  "created_at": "2025-03-20T09:00:00Z"
 }
 ```
 
-**Auto-analysis:** After upload, the system automatically generates 5 analysis questions, runs them in the background, and stores results in `auto_analysis_json`. These are immediately available on the UI without any user action.
-
 ---
 
-### POST /data-sources/connect-sql
+### POST /data-sources/connect
 
-Connect a PostgreSQL or MySQL database. Credentials are encrypted with AES-256 before storage.
+**Protected · Admin only.** Connect a live SQL database. Credentials are encrypted with AES-256-GCM before storage — the plaintext connection string is never persisted.
 
 **Request:**
 ```json
 {
-  "name": "Production DB",
+  "name": "Production CRM",
+  "db_type": "postgresql",
   "host": "db.acme.com",
   "port": 5432,
-  "database": "analytics",
+  "database": "crm_prod",
   "username": "readonly_user",
-  "password": "db_password",
-  "db_type": "postgresql"
+  "password": "...",
+  "domain_type": "customer"
 }
 ```
 
-**Response `201`:** Data source object. Credentials are never returned after creation.
+**Response `201`:** Data source object (credentials not returned).
 
 ---
 
 ### GET /data-sources
 
-List all data sources for the tenant.
+**Protected.** List all data sources for the authenticated tenant.
+
+**Response `200`:** Array of data source objects.
+
+---
+
+### GET /data-sources/{id}
+
+**Protected.** Retrieve a single data source including schema and auto-analysis status.
+
+---
+
+### GET /data-sources/{id}/auto-analysis
+
+**Protected.** Retrieve the 5 pre-generated analyses computed on upload. Returns immediately if `auto_analysis_status == "done"`, otherwise returns current status.
 
 **Response `200`:**
 ```json
 {
-  "sources": [
+  "status": "done",
+  "analyses": [
     {
-      "id": "a3f8b2c1-...",
-      "type": "csv",
-      "name": "Q4 Sales Data",
-      "row_count": 5000,
-      "auto_analysis_status": "done",
-      "domain_type": "sales",
-      "created_at": "2025-03-16T10:05:00Z"
+      "question": "What is the revenue trend over the last 4 quarters?",
+      "insight": "Revenue grew 23% from Q1 to Q4, with Q3 showing the strongest single-quarter jump at +11%.",
+      "chart": { /* Plotly spec */ },
+      "recommendations": ["Investigate Q3 drivers...", "..."]
     }
   ]
 }
@@ -253,17 +259,9 @@ List all data sources for the tenant.
 
 ---
 
-### GET /data-sources/{source_id}
+### DELETE /data-sources/{id}
 
-Get a single data source with full schema details.
-
----
-
-### DELETE /data-sources/{source_id}
-
-**Admin only.** Delete a data source and all associated analysis jobs.
-
-**Response `204`:** No content.
+**Protected · Admin only.** Delete a data source and all associated jobs, results, and uploaded files.
 
 ---
 
@@ -271,146 +269,132 @@ Get a single data source with full schema details.
 
 ### POST /analysis/query
 
-Submit a natural-language analysis question. Creates a pending job and dispatches it through the 4-layer pipeline.
+**Protected.** Submit a natural-language analysis question. Returns immediately with a `job_id` — use polling or the status endpoint to track progress.
 
 **Request:**
 ```json
 {
-  "source_id": "a3f8b2c1-...",
+  "source_id": "ds-uuid",
   "question": "What are the top 5 products by revenue in Q4?",
-  "kb_id": null,
-  "complexity_index": 2,
-  "total_pills": 1
+  "kb_id": "kb-uuid"
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `source_id` | UUID | The data source to analyze |
-| `question` | string | Natural language question |
-| `kb_id` | UUID (optional) | Knowledge base for PDF hybrid fusion |
-| `complexity_index` | int 1-5 | Complexity hint from intake agent |
-| `total_pills` | int | Number of analysis sub-questions |
+- `kb_id` (optional) — Link a knowledge base for PDF hybrid fusion with SQL results
 
-**Response `201`:**
+**Response `202`:**
 ```json
 {
-  "id": "b5e2a1f3-...",
+  "job_id": "job-uuid",
   "status": "pending",
-  "question": "What are the top 5 products by revenue in Q4?",
-  "source_id": "a3f8b2c1-...",
-  "created_at": "2025-03-16T10:10:00Z"
+  "message": "Analysis queued. Poll /analysis/{job_id} for updates."
 }
-```
-
-**Job lifecycle:**
-```
-pending → running → awaiting_approval (SQL only) → running → done
-                                                           └→ error
 ```
 
 ---
 
 ### GET /analysis/{job_id}
 
-Poll the status of an analysis job. Poll every 2-3 seconds until `status=done`.
+**Protected.** Poll job status. For SQL jobs awaiting HITL approval, returns the generated SQL for admin review.
 
-**Response `200`:**
+**Response `200` — in progress:**
 ```json
 {
-  "id": "b5e2a1f3-...",
-  "status": "awaiting_approval",
-  "question": "What are the top 5 products by revenue in Q4?",
-  "generated_sql": "SELECT product_name, SUM(revenue) as total_revenue FROM sales WHERE quarter = 'Q4' GROUP BY product_name ORDER BY total_revenue DESC LIMIT 5",
+  "id": "job-uuid",
+  "status": "running",
+  "intent": "ranking",
+  "complexity_index": 3,
   "thinking_steps": [
-    {"node": "data_discovery", "output": "Found 12 columns, 5000 rows..."},
-    {"node": "analysis_generator", "output": "Generated SELECT query..."}
-  ],
-  "retry_count": 0,
-  "started_at": "2025-03-16T10:10:02Z"
+    {"node": "data_discovery", "output": "Found 12 tables, selected: sales, products"},
+    {"node": "analysis_generator", "output": "Generated SQL targeting sales.revenue + products.name"}
+  ]
 }
 ```
 
-When `status=awaiting_approval`, the `generated_sql` is shown to the admin for review before execution.
+**Response `200` — awaiting admin approval:**
+```json
+{
+  "id": "job-uuid",
+  "status": "awaiting_approval",
+  "generated_sql": "SELECT p.name, SUM(s.revenue) AS total FROM sales s JOIN products p ON s.product_id = p.id WHERE s.quarter = 'Q4' GROUP BY p.name ORDER BY total DESC LIMIT 5",
+  "message": "Admin approval required before SQL execution."
+}
+```
+
+**Response `200` — completed:**
+```json
+{
+  "id": "job-uuid",
+  "status": "done",
+  "completed_at": "2025-03-20T09:05:22Z"
+}
+```
 
 ---
 
 ### POST /analysis/{job_id}/approve
 
-**Admin only.** Approve a paused SQL job. Updates LangGraph checkpointer state and re-dispatches to the SQL worker.
+**Protected · Admin only.** Approve a HITL-paused SQL job. Resumes LangGraph execution from the Redis checkpoint.
 
-**Response `200`:** Updated job with `status=running`.
+**Response `200`:**
+```json
+{ "message": "Job approved and resumed." }
+```
+
+**Errors:** `403` — Viewer role | `404` — Job not found | `409` — Job not in awaiting_approval state
+
+---
+
+### POST /analysis/{job_id}/reject
+
+**Protected · Admin only.** Reject a HITL-paused SQL job with an optional reason.
+
+**Request:**
+```json
+{ "reason": "Query touches restricted compensation columns." }
+```
 
 ---
 
 ### GET /analysis/{job_id}/result
 
-Get the full analysis result for a completed job.
+**Protected.** Retrieve the full analysis result for a completed job.
 
 **Response `200`:**
 ```json
 {
-  "job_id": "b5e2a1f3-...",
+  "job_id": "job-uuid",
   "charts": [
     {
       "type": "bar",
-      "data": {...},
-      "layout": {"title": "Top 5 Products by Revenue Q4"}
+      "data": { /* Plotly data */ },
+      "layout": { "title": "Top 5 Products by Q4 Revenue", "xaxis": {...}, "yaxis": {...} }
     }
   ],
-  "insight_report": "Product A dominated Q4 with $2.3M in revenue, representing 34% of total sales. Products B and C showed strong growth momentum (+18% vs Q3). The bottom 2 performers account for only 8% of revenue and may warrant strategic review.",
+  "insight_report": "Product A led Q4 with $2.3M in revenue, representing 28% of total quarterly sales. Products B and C showed strong momentum with 15% and 12% quarter-over-quarter growth respectively.",
   "recommendations": [
-    "Increase inventory allocation for Product A ahead of Q1 demand",
-    "Investigate the sales velocity drop for Products D and E",
-    "Consider bundling Products B and C given their co-purchase correlation"
+    "Prioritize Product A inventory for Q1 — demand signals suggest continued growth.",
+    "Investigate Product D's 8% Q4 decline relative to Q3 performance.",
+    "Run a cohort analysis on new customers acquired via Product C promotions."
   ],
   "data_snapshot": [
-    {"product_name": "Product A", "total_revenue": 2300000},
-    ...
+    {"name": "Product A", "total": 2300000},
+    {"name": "Product B", "total": 1850000}
   ]
 }
 ```
 
 ---
 
-### GET /analysis/history
+### GET /analysis
 
-Get analysis job history.
+**Protected.** List all analysis jobs for the authenticated tenant. Supports filtering by status and date range.
 
-**Query params:**
-- `limit` (default 50, max 200)
-- `offset` (default 0)
-
-**Access control:**
-- **Admin:** sees ALL jobs for the tenant
-- **Viewer:** sees ONLY their own jobs
-
----
-
-### POST /analysis/diagnose
-
-Analyze a business problem and suggest diagnostic scenarios before submitting a full query.
-
-**Request:**
-```json
-{
-  "source_id": "a3f8b2c1-...",
-  "problem_description": "Our customer churn rate increased by 15% last quarter"
-}
-```
-
-**Response `200`:**
-```json
-{
-  "suggested_analyses": [
-    "Which customer segments have the highest churn rate?",
-    "What is the correlation between support tickets and churn?",
-    "How does churn vary by subscription duration?"
-  ],
-  "detected_intent": "anomaly",
-  "schema_context": "Relevant columns: customer_id, churn_date, segment, tenure_months"
-}
-```
+**Query parameters:**
+- `status` — Filter by status (`pending | running | done | error | awaiting_approval`)
+- `source_id` — Filter by data source
+- `limit` — Max results (default: 50)
+- `offset` — Pagination offset
 
 ---
 
@@ -418,65 +402,86 @@ Analyze a business problem and suggest diagnostic scenarios before submitting a 
 
 ### POST /knowledge
 
-Upload a PDF and index it in Qdrant for hybrid SQL+PDF fusion.
+**Protected · Admin only.** Create a knowledge base and upload a PDF document. Triggers ColPali multi-vector indexing in Qdrant (text embeddings + image patch embeddings per page).
 
-**Form fields:**
-- `file` — PDF file
+**Request:** `multipart/form-data`
+- `file` — PDF document
 - `name` — Knowledge base name
 - `description` — Optional description
 
-**Response `201`:** Knowledge base object with indexing status.
-
----
-
-### GET /knowledge
-
-List all knowledge bases for the tenant.
-
----
-
-### DELETE /knowledge/{kb_id}
-
-**Admin only.** Delete knowledge base and all Qdrant vectors.
-
----
-
-## 6. Policies
-
-Admin-managed guardrail rules enforced by the Governance layer before any analysis executes.
-
-### POST /policies
-
-**Admin only.** Create a new guardrail policy.
-
-**Request:**
+**Response `201`:**
 ```json
 {
-  "name": "No PII Exposure",
-  "rule": "Never generate queries that expose columns containing email, phone, SSN, or credit card data",
-  "is_active": true
+  "id": "kb-uuid",
+  "name": "Product Catalog 2025",
+  "description": "Official product specifications and pricing",
+  "created_at": "..."
 }
 ```
 
 ---
 
-### GET /policies
+### GET /knowledge
 
-List all active policies for the tenant.
+**Protected.** List all knowledge bases for the tenant.
 
 ---
 
-### PATCH /policies/{policy_id}
+### DELETE /knowledge/{id}
 
-Update or deactivate a policy.
+**Protected · Admin only.** Delete a knowledge base and remove all associated Qdrant vectors.
+
+---
+
+## 6. Policies
+
+Policies are natural-language guardrail rules enforced by the LLM Guardrail Agent before any SQL query executes.
+
+**Example policies:**
+- `"Never expose columns containing 'salary', 'compensation', or 'pay' in query results"`
+- `"Reject any query that would return individual employee records"`
+- `"Do not allow analysis of the users or auth_tokens tables"`
+
+### POST /policies
+
+**Protected · Admin only.**
+
+**Request:**
+```json
+{
+  "name": "PII Protection",
+  "rule": "Never return columns containing personal identifiable information such as SSN, passport number, or date of birth.",
+  "is_active": true
+}
+```
+
+**Response `201`:** Policy object.
+
+---
+
+### GET /policies
+
+**Protected.** List all policies for the tenant (active and inactive).
+
+---
+
+### PATCH /policies/{id}
+
+**Protected · Admin only.** Update a policy rule or toggle `is_active`.
+
+---
+
+### DELETE /policies/{id}
+
+**Protected · Admin only.**
 
 ---
 
 ## 7. Reports & Export
 
-### POST /reports/export/{job_id}
+### POST /reports/{job_id}/export
 
-Trigger async export of an analysis result.
+**Protected.** Trigger async export of a completed analysis result. Returns a `report_id` for polling.
 
 **Request:**
 ```json
@@ -485,40 +490,64 @@ Trigger async export of an analysis result.
 }
 ```
 
-Supported formats: `pdf`, `xlsx`, `json`
+- `format` — `"pdf" | "xlsx" | "json"`
 
-**Response `202`:** Export job ID. Poll `/reports/export/{export_id}/status` for completion.
+**Response `202`:**
+```json
+{
+  "report_id": "report-uuid",
+  "status": "pending"
+}
+```
 
 ---
 
-### GET /reports/export/{export_id}/download
+### GET /reports/{report_id}
 
-Download the exported file once status is `done`.
+**Protected.** Poll export status and retrieve download URL when ready.
 
-**Response:** Binary file with appropriate `Content-Type` header.
+**Response `200` — ready:**
+```json
+{
+  "report_id": "report-uuid",
+  "status": "done",
+  "download_url": "/reports/report-uuid/download",
+  "expires_at": "2025-03-20T10:00:00Z"
+}
+```
+
+---
+
+### GET /reports/{report_id}/download
+
+**Protected.** Stream the generated report file. Returns `Content-Disposition: attachment` with appropriate MIME type.
 
 ---
 
 ## 8. Metrics
 
-### GET /metrics/usage
+### GET /metrics/summary
 
-**Admin only.** Tenant usage statistics.
+**Protected · Admin only.** Tenant-level analytics: job counts by status, average latency, error rate, data source breakdown.
 
 **Response `200`:**
 ```json
 {
-  "total_jobs": 147,
-  "jobs_this_month": 43,
-  "avg_latency_ms": 8420,
+  "total_jobs": 847,
   "jobs_by_status": {
-    "done": 138,
-    "error": 6,
-    "pending": 3
+    "done": 801,
+    "error": 23,
+    "awaiting_approval": 8,
+    "running": 15
   },
-  "jobs_by_source_type": {
-    "csv": 89,
-    "sql": 58
+  "avg_completion_seconds": 14.3,
+  "data_sources_count": 12,
+  "top_intents": {
+    "trend": 312,
+    "ranking": 198,
+    "comparison": 187,
+    "correlation": 95,
+    "anomaly": 55
   }
 }
 ```
@@ -527,7 +556,7 @@ Download the exported file once status is `done`.
 
 ### GET /metrics/jobs
 
-Time-series job completion data for dashboard charts.
+**Protected · Admin only.** Paginated job analytics with latency breakdown by pipeline node.
 
 ---
 
@@ -535,49 +564,86 @@ Time-series job completion data for dashboard charts.
 
 ### GET /health
 
-**No authentication required.** Liveness probe.
+No authentication required. Returns system health and service connectivity.
 
 **Response `200`:**
 ```json
-{"status": "ok"}
+{
+  "status": "healthy",
+  "version": "1.0.0",
+  "services": {
+    "database": "ok",
+    "redis": "ok",
+    "qdrant": "ok"
+  },
+  "timestamp": "2025-03-20T09:00:00Z"
+}
 ```
+
+**Response `503`:** If any critical service is unreachable.
 
 ---
 
 ## 10. Error Responses
 
-All errors return a consistent structure:
+All errors follow a consistent envelope:
 
 ```json
 {
-  "detail": "Human-readable error message"
+  "detail": "Human-readable error message",
+  "error_code": "MACHINE_READABLE_CODE",
+  "timestamp": "2025-03-20T09:00:00Z"
 }
 ```
 
-| Code | Meaning |
+| HTTP Code | Meaning |
 |---|---|
-| `400` | Bad request — invalid input |
-| `401` | Unauthorized — missing or invalid/expired token |
-| `403` | Forbidden — insufficient role (admin required) |
-| `404` | Not found — resource doesn't exist or belongs to another tenant |
-| `409` | Conflict — email already registered |
-| `422` | Validation error — missing required field or wrong type |
+| `400` | Bad request — validation or business logic error |
+| `401` | Unauthenticated — missing or invalid JWT |
+| `403` | Forbidden — authenticated but insufficient role |
+| `404` | Resource not found (always tenant-scoped — cannot detect other tenants' resources) |
+| `409` | Conflict — e.g. approving a job not in `awaiting_approval` state |
+| `413` | Payload too large — file exceeds `MAX_UPLOAD_SIZE_MB` |
+| `422` | Unprocessable entity — Pydantic validation failure |
 | `429` | Rate limit exceeded |
-| `500` | Internal server error — Celery worker failure or DB error |
+| `503` | Service unavailable — upstream dependency down |
 
 ---
 
 ## 11. Role-Based Access
 
-| Endpoint | Admin | Viewer |
+| Endpoint Group | `admin` | `viewer` |
 |---|---|---|
-| Register / Login / Refresh | ✅ | ✅ |
-| Upload / Connect data source | ✅ | ❌ |
-| List data sources | ✅ | ✅ (own tenant) |
-| Submit analysis query | ✅ | ✅ |
-| View all jobs | ✅ | ❌ (own only) |
-| Approve HITL SQL job | ✅ | ❌ |
-| Manage policies | ✅ | ❌ |
-| Invite users | ✅ | ❌ |
-| View usage metrics | ✅ | ❌ |
-| Export results | ✅ | ✅ (own jobs) |
+| Register / login / refresh / logout | ✅ | ✅ |
+| GET /users/me | ✅ | ✅ |
+| POST /users/invite | ✅ | ❌ |
+| POST /data-sources/upload | ✅ | ✅ |
+| POST /data-sources/connect | ✅ | ❌ |
+| DELETE /data-sources/{id} | ✅ | ❌ |
+| POST /analysis/query | ✅ | ✅ |
+| GET /analysis / GET /analysis/{id} | ✅ | ✅ |
+| POST /analysis/{id}/approve | ✅ | ❌ |
+| POST /analysis/{id}/reject | ✅ | ❌ |
+| POST /knowledge | ✅ | ❌ |
+| POST /policies | ✅ | ❌ |
+| GET /metrics/summary | ✅ | ❌ |
+| POST /reports/{id}/export | ✅ | ✅ |
+
+---
+
+## 12. Rate Limits Reference
+
+| Endpoint | Limit | Enforcement |
+|---|---|---|
+| `POST /auth/register` | 3 / minute | Per IP |
+| `POST /auth/login` | 5 / minute | Per IP |
+| All other endpoints | 200 / minute | Per IP |
+
+Rate limit headers are returned on every response:
+```
+X-RateLimit-Limit: 200
+X-RateLimit-Remaining: 187
+X-RateLimit-Reset: 1711024860
+```
+
+When exceeded, returns `429 Too Many Requests` with a `Retry-After` header.

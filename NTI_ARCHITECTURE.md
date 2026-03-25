@@ -14,7 +14,8 @@
 6. [Data Flow — Full Query Lifecycle](#6-data-flow--full-query-lifecycle)
 7. [Database Schema](#7-database-schema)
 8. [Infrastructure & Deployment](#8-infrastructure--deployment)
-9. [Key Design Decisions](#9-key-design-decisions)
+9. [Observability Stack](#9-observability-stack)
+10. [Key Design Decisions](#10-key-design-decisions)
 
 ---
 
@@ -24,16 +25,19 @@
 Each service owns one concept: the API Gateway owns HTTP concerns (auth, routing, validation), the Governance worker owns policy enforcement, the execution pillars own analysis. No service does two jobs.
 
 **Celery queues as the API between layers.**
-Services communicate only through named Celery queues over Redis. `api` → `governance` queue → `pillar.sql` queue. No direct HTTP calls between workers. This means a worker crash never blocks the API.
+Services communicate only through named Celery queues over Redis. `api` → `governance` queue → `pillar.sql` queue. No direct HTTP calls between workers. A worker crash never blocks the API — the job stays in the queue until a healthy worker picks it up.
 
 **Stateless workers, stateful checkpointing.**
-Every Celery worker is ephemeral — it can be killed and replaced. LangGraph state is persisted to Redis via `AsyncRedisSaver`. A HITL-paused SQL job survives a worker restart.
+Every Celery worker is ephemeral. LangGraph state is persisted to Redis via `AsyncRedisSaver`. A HITL-paused SQL job survives a worker restart, a pod eviction, or a full cluster reboot.
 
 **Multi-tenant at the data layer, not the application layer.**
-A single API deployment serves all tenants. Isolation is enforced by `tenant_id` on every database query — not by separate databases or separate deployments. This is safe because every query is scoped in a SQLAlchemy `where(Model.tenant_id == current_user.tenant_id)` clause.
+A single API deployment serves all tenants. Isolation is enforced by `tenant_id` on every database query — not by separate databases or deployments. Every query is scoped in a SQLAlchemy `where(Model.tenant_id == current_user.tenant_id)` clause. Tenant A cannot detect the existence of Tenant B's resources.
 
 **Fail loudly in development, fail safely in production.**
 The `Settings` validator crashes startup if `SECRET_KEY` or `AES_KEY` are at their default values when `ENV=production`. You cannot accidentally deploy with weak secrets.
+
+**Observability is not optional.**
+Every service emits structured logs via `structlog`. Prometheus metrics are scraped at `/metrics`. Grafana dashboards are provisioned automatically — no manual setup.
 
 ---
 
@@ -57,6 +61,7 @@ The `Settings` validator crashes startup if `SECRET_KEY` or `AES_KEY` are at the
 │                               │ Celery tasks                              │
 │                        ┌──────▼──────┐                                   │
 │                        │    REDIS    │ Broker + cache + JWT blacklist     │
+│                        │             │ + LangGraph HITL checkpoints       │
 │                        └──────┬──────┘                                   │
 │           ┌───────────────────┼───────────────────┐                      │
 │           ▼                   ▼                   ▼                      │
@@ -79,6 +84,11 @@ The `Settings` validator crashes startup if `SECRET_KEY` or `AES_KEY` are at the
 │  │   :5433         │  │  Uploaded files, exported reports            │   │
 │  │   Metadata DB   │  └──────────────────────────────────────────────┘   │
 │  └─────────────────┘                                                      │
+│                                                                           │
+│  ┌─────────────────┐  ┌─────────────────┐                                │
+│  │   Prometheus    │  │     Grafana     │ Observability stack            │
+│  │   :9090         │  │     :3000       │                                │
+│  └─────────────────┘  └─────────────────┘                                │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -88,102 +98,85 @@ The `Settings` validator crashes startup if `SECRET_KEY` or `AES_KEY` are at the
 
 ### Layer 1 — API Gateway (`services/api`)
 
-The only service exposed to the internet. Port 8002.
+The only public-facing service. Handles HTTP, auth, file storage, and Celery dispatch. Never executes analysis logic.
 
-**What it does:**
-- Validates JWT tokens on every protected request
-- Enforces tenant scoping on every database query
-- Encrypts SQL credentials with AES-256 before storage
-- Builds `AnalysisJob` records and dispatches to `governance` queue
-- Returns job ID to client immediately (async — never waits for analysis)
-- Serves the Glassmorphism SPA at `/`
+**Routing table:**
 
-**What it never does:**
-- Executes SQL queries against user databases
-- Runs LangGraph agents
-- Calls Groq directly
+| Endpoint Group | Responsibility |
+|---|---|
+| `/auth/*` | JWT issuance, refresh rotation, Redis JTI revocation |
+| `/data-sources/*` | File upload, schema profiling, SQL credential encryption, auto-analysis dispatch |
+| `/analysis/*` | Job submission, status polling, HITL approval, result retrieval |
+| `/knowledge/*` | PDF ingestion → Qdrant ColPali indexing |
+| `/policies/*` | Admin guardrail rule management |
+| `/metrics/*` | Job analytics, latency stats, tenant usage |
+| `/reports/*` | Async export dispatch + signed download URLs |
 
-**Internal architecture:**
+**Key infrastructure modules:**
+
 ```
-services/api/app/
-├── main.py                # FastAPI factory + self-healing DB migration on startup
-├── routers/               # auth, users, data_sources, analysis, knowledge,
-│                          # policies, metrics, reports
-├── models/                # SQLAlchemy ORM: tenant, user, data_source,
-│                          # analysis_job, analysis_result, knowledge, policy
-├── schemas/               # Pydantic v2 request/response models
-├── use_cases/             # Business logic separated from router handlers
-│   ├── analysis/          # run_pipeline, diagnose_service
-│   ├── auto_analysis/     # Background 5-question generation on upload
-│   └── export/            # Export dispatch
-└── infrastructure/
-    ├── config.py          # Pydantic Settings — crashes on weak prod secrets
-    ├── security.py        # JWT + bcrypt
-    ├── sql_guard.py       # 3-layer SQL injection guard
-    ├── middleware.py      # CORS, rate limit, security headers, request logging
-    ├── token_blacklist.py # Redis JTI revocation
-    └── adapters/
-        ├── encryption.py  # AES-256-GCM
-        ├── qdrant.py      # Vector DB adapter
-        └── storage.py     # Tenant-scoped file paths
+infrastructure/
+├── config.py           Pydantic Settings — validates env vars on startup
+├── security.py         JWT access (30min) + refresh (7 days) + bcrypt
+├── sql_guard.py        3-layer SQL injection prevention
+├── middleware.py        CORS · rate limiting (slowapi) · security headers
+├── token_blacklist.py  Redis-backed JTI revocation set
+└── adapters/
+    ├── encryption.py   AES-256-GCM — encrypt/decrypt SQL connection strings
+    ├── qdrant.py       Async Qdrant client — multi-vector upsert + search
+    └── storage.py      Tenant-scoped file path resolution
 ```
 
 ---
 
 ### Layer 2 — Governance (`services/governance`)
 
-Celery worker on the `governance` queue. Every job passes here first.
+Dedicated Celery worker on the `governance` queue. Every job passes through here before reaching any execution pillar.
 
 **LangGraph graph:**
 ```
-START
-  │
-  ▼
-[intake_agent]
-  │  Classifies intent (trend/comparison/ranking/correlation/anomaly)
-  │  Extracts entities: table names, column names, date ranges
-  │  Detects ambiguity: sets clarification_needed=True if unclear
-  │
-  ▼
-check_intake
-  ├── clarification_needed=True → END (job status: "awaiting_clarification")
-  └── clear → [guardrail_agent]
-                │  Evaluates against admin-defined policies
-                │  Detects PII exposure risk
-                │  Sets policy_violation=True if blocked
-                ▼
-               END → dispatches to correct pillar queue
+START → [intake_agent] → check_intake → [guardrail_agent] → END
+                               │
+                               └── clarification_needed → END
 ```
 
-The governance layer acts as a **semantic firewall** — it's the only place where admin-defined natural language policies are enforced. A policy like `"never expose salary data"` is evaluated here by the LLM before any query reaches the database.
+**Intake Agent responsibilities:**
+- Classify question intent: `trend | comparison | ranking | correlation | anomaly`
+- Extract named entities (table names, column names, date ranges)
+- Detect ambiguous or underspecified questions
+- Assign complexity index (1–5) based on entity count and join requirements
+
+**Guardrail Agent responsibilities:**
+- Load active policies for the tenant from PostgreSQL
+- LLM semantic check: does this question violate any policy?
+- PII detection: would the answer expose sensitive columns?
+- If violation: set job to `error` status with a human-readable explanation
 
 ---
 
 ### Layer 3 — Execution Pillars
 
-Four independent Celery workers, each isolated in its own Docker container.
+Four workers, each independently scalable:
 
-**Queue routing:**
 ```
-source.type = "csv"        → pillar.csv          → worker-csv
-source.type = "sql"        → pillar.sql           → worker-sql
-source.type = "sqlite"     → pillar.sqlite        → worker-sql
-source.type = "postgresql" → pillar.postgresql    → worker-sql
-source.type = "json"       → pillar.json          → worker-json
-source.type = "document"   → pillar.pdf           → worker-pdf
+worker-sql   → queues: pillar.sql, pillar.sqlite, pillar.postgresql
+worker-csv   → queue:  pillar.csv
+worker-json  → queue:  pillar.json
+worker-pdf   → queue:  pillar.pdf
 ```
 
-Each pillar has its own `requirements.txt` — the PDF worker has `colpali-engine` and `pypdfium2` while the CSV worker has `pandas` and `scikit-learn`. Workers only install what they need.
+Each worker is a separate Docker container with its own `requirements.txt`. The SQL worker can scale to 10 replicas without affecting CSV or PDF processing.
 
 ---
 
 ### Layer 4 — Exporter (`services/exporter`)
 
-Celery worker on the `export` queue. Generates formatted output files from completed `analysis_results` records.
+Async worker on the `export` queue. Receives completed `AnalysisResult` objects and renders them to:
+- **PDF** — formatted report with charts as static images
+- **XLSX** — data snapshot in Sheet 1, recommendations in Sheet 2
+- **JSON** — raw result envelope for downstream consumption
 
-Supported formats: PDF (weasyprint), XLSX (openpyxl), JSON.
-
-Files are written to the shared `tenant_uploads` Docker volume and served via the API gateway.
+Output files are written to `tenant_uploads/{tenant_id}/exports/` and served via signed download URLs through the API Gateway.
 
 ---
 
@@ -191,249 +184,307 @@ Files are written to the shared `tenant_uploads` Docker volume and served via th
 
 ### SQL Pipeline — 11 Nodes
 
-The centerpiece of the platform. Handles live enterprise databases with schema compression, HITL, self-healing, hybrid knowledge fusion, and quality verification.
-
-#### AnalysisState
-
-The shared state object. Every node reads from it and returns only the fields it modifies:
-
-```python
-class AnalysisState(TypedDict):
-    question: str           # Original user question
-    source_id: str          # Data source identifier
-    connection_string: str  # Decrypted at runtime — never stored
-    schema_summary: dict    # Compressed table/column metadata from discovery
-    generated_sql: str      # SQL query from analysis_generator
-    analysis_results: dict  # Query results + execution metadata
-    charts: list            # Plotly chart specs from visualization agent
-    insight_report: str     # Executive summary from insight agent
-    recommendations: list   # Action items from recommendation agent
-    reflection_context: str # Self-healing hint on zero-row results
-    reflection_count: int   # Max 1 zero-row reflection attempt
-    retry_count: int        # Max 3 error retries
-    error: str              # Last error message
-    policy_violation: str   # Guardrail rejection reason
-    approval_granted: bool  # HITL approval flag (Redis checkpointer)
-    user_id: str            # "auto_analysis" bypasses HITL
-    kb_id: str              # Optional: knowledge base for PDF fusion
-    thinking_steps: list    # All node outputs (shown in UI)
-```
-
-#### Node Responsibilities
-
-| Node | Responsibility | Self-Healing |
-|---|---|---|
-| `data_discovery` | Schema compression: parallel table profiling, FK inference, Mermaid ERD generation, `low_cardinality_values` sampling | Handles large schemas via token-budget schema selector |
-| `analysis_generator` | ReAct agent: uses `sql_schema_discovery` and golden SQL examples to generate ANSI SELECT | Receives `reflection_context` on retry |
-| `human_approval` | Graph interrupt — pauses until `approval_granted=True` in Redis checkpointer | N/A |
-| `execution` | Runs approved SQL, fetches up to 1,000 rows, triggers zero-row reflection if needed | Injects case-sensitivity hints for string literal mismatches |
-| `backtrack` | Analyzes failure type, generates strategic hint, increments `retry_count` | Routes back to `analysis_generator` (max 3 times) |
-| `hybrid_fusion` | Fetches Qdrant KB context related to SQL results | Gracefully skips if `kb_id` is null |
-| `visualization` | Generates Plotly chart specs matching the analysis type | Falls back to table view on chart generation failure |
-| `insight` | 3-5 sentence executive summary referencing actual data values | — |
-| `verifier` | Quality gate: checks insight claims match the data | — |
-| `recommendation` | 3 specific, actionable next steps | — |
-| `memory_persistence` | Saves successful query+insight to `insight_memory` for golden SQL examples | Fire-and-forget — never blocks pipeline |
-
-#### Zero-Row Reflection (Self-Healing)
-
-The most important self-healing mechanism in the platform:
+The most complex pipeline. Handles schema discovery, HITL approval, self-healing on zero results, hybrid PDF fusion, and quality verification.
 
 ```
-SQL executes → row_count = 0 AND reflection_count < 1
-    │
-    ▼
-Extract string literals from WHERE clauses using regex
-Find corresponding column in schema_summary
-Check low_cardinality_values for case-insensitive match
-    │
-    ├── Match found: inject hint
-    │   "You filtered by 'active' but sampled data shows 'Active'.
-    │    SQL is case-sensitive for string comparisons."
-    │
-    └── No match: generic hint
-        "The query returned 0 rows. Try relaxing the filters."
-    │
-    ▼
-Set reflection_context → route to [backtrack] → [analysis_generator]
-    │  Generator receives the hint and rewrites the query
-    ▼
-Re-execute → typically returns correct results
+START
+  │
+  ▼
+[data_discovery]
+  │  Tools: sql_schema_discovery
+  │  • Connects to the database (decrypts AES-256 credentials from state)
+  │  • Profiles up to 5,000 rows per table
+  │  • Extracts: column names, types, PKs, FKs, sample values, low-cardinality enums
+  │  • Generates Mermaid ERD for complex schemas
+  │  • schema_selector compresses to relevant tables for the question
+  │
+  ▼
+[analysis_generator]
+  │  ReAct agent with tools: sql_schema_discovery, run_sql_query (dry-run)
+  │  Retrieves golden SQL examples from insight_memory (similar past questions)
+  │  Generates: ANSI SELECT query + execution plan annotation
+  │  sql_validator: syntax check before routing
+  │
+  ▼
+route_after_generator
+  ├── auto_analysis=True → skip HITL → [execution]
+  └── user job          → [human_approval]
+                              │  INTERRUPT fires (interrupt_before=["human_approval"])
+                              │  Full graph state serialized to Redis (AsyncRedisSaver)
+                              │  Job status: awaiting_approval
+                              │  Generated SQL surfaced to admin in UI
+                              │
+                              │  POST /analysis/{id}/approve
+                              │  State updated: {approval_granted: True}
+                              │  Graph resumed from checkpoint
+                              ▼
+                         [execution]
+                              │  Tools: run_sql_query (live mode, ≤1,000 rows)
+                              │  Captures: row_count, column_names, data_snapshot
+                              │
+                         route_after_execution
+                          ├── row_count=0 → [backtrack]
+                          │      │  Compares SQL literals against low_cardinality_values
+                          │      │  Detects case mismatches (e.g. "q4" vs "Q4")
+                          │      │  Injects correction hint into state
+                          │      │  retry_count += 1 (max 3)
+                          │      └──► [analysis_generator]
+                          │
+                          └── success → [hybrid_fusion]
+                                            │  If kb_id present: Qdrant multi-vector search
+                                            │  Retrieves PDF context related to SQL result
+                                            │  Merges into state for insight generation
+                                            ▼
+                                      [visualization]
+                                            │  Selects chart type based on intent + data shape
+                                            │  Generates Plotly JSON spec (bar/line/scatter/pie)
+                                            ▼
+                                       [insight]
+                                            │  3–5 sentence executive summary
+                                            │  Grounds claims in actual row values
+                                            │  References PDF context if hybrid_fusion ran
+                                            ▼
+                                       [verifier]
+                                            │  Quality gate: does the insight match the data?
+                                            │  If mismatch: regenerates insight (once)
+                                            │  Prevents hallucinated insights
+                                            ▼
+                                   [recommendation]
+                                            │  3 specific, actionable next steps
+                                            │  Tied to the question intent and data findings
+                                            ▼
+                                  [memory_persistence]
+                                            │  Saves {question → SQL} to insight_memory table
+                                            │  Used as golden examples in future analysis_generator
+                                            ▼
+                                  [output_assembler]
+                                            │  Builds final JSON: charts + insight + recommendations
+                                            │  + data_snapshot + thinking_steps
+                                            │  Writes AnalysisResult to PostgreSQL
+                                            │  Updates job status to "done"
+                                            ▼
+                                           END
 ```
 
 ---
 
 ### CSV Pipeline — 7 Nodes
 
+Simpler pipeline — no HITL needed (user-uploaded files have no live DB credentials at risk).
+
 ```
-data_discovery → needs_cleaning? → data_cleaning (optional) → analysis
-    → visualization → insight → recommendation → output_assembler
+START
+  │
+  ▼
+[data_discovery]
+  │  Tools: profile_dataframe
+  │  • Pandas dtype inference
+  │  • Null ratio per column
+  │  • Unique value counts
+  │  • Outlier density (IQR method)
+  │  • Computes data_quality_score = f(null_ratio, type_consistency, outlier_density)
+  │
+  ▼
+needs_cleaning? (data_quality_score < 0.9)
+  ├── YES → [data_cleaning]
+  │      │  Tools: clean_dataframe
+  │      │  • Null imputation (median for numeric, mode for categorical)
+  │      │  • Type coercion (string dates → datetime64)
+  │      │  • Outlier flagging (adds _outlier boolean column)
+  │      └──► [analysis]
+  └── NO  →    [analysis]
+                   │  Tools: compute_trend, compute_ranking, compute_correlation
+                   │  Selects tool based on classified intent
+                   │  Executes Pandas operations, returns summary stats + data
+                   ▼
+             [visualization]
+                   │  Generates Plotly chart spec appropriate to the analysis type
+                   ▼
+              [insight]        → Executive summary grounded in computed statistics
+                   ▼
+          [recommendation]     → 3 next steps
+                   ▼
+         [output_assembler]    → Final JSON → PostgreSQL → job status "done"
+                   ▼
+                  END
 ```
 
-**Data quality scoring:**
-The discovery agent computes a quality score (0.0–1.0) based on:
-- Null ratio: `1 - (total_nulls / total_cells)`
-- Type consistency: penalizes mixed-type columns
-- Outlier density: penalizes columns where >5% of values are statistical outliers
+---
 
-Scores below 0.9 route through `data_cleaning` before analysis. This prevents the analysis agent from drawing conclusions from dirty data.
+### Governance Pipeline — 2 Nodes
 
-**CSV-specific tools:**
-- `profile_dataframe` — dtype inference, null counts, unique counts, sample values
-- `run_pandas_query` — executes LLM-generated pandas code in a sandboxed eval
-- `compute_correlation` — Pearson correlation matrix for numeric columns
-- `compute_trend` — time-series decomposition if a date column is detected
-- `compute_ranking` — sorted aggregations with percentage contribution
-- `clean_dataframe` — null imputation, type coercion, outlier flagging
+```
+START → [intake_agent] → check_intake → [guardrail_agent] → END
+                               │
+                               └── clarification_needed → END
+```
+
+The bypass path: `auto_analysis` system user skips governance. Background analyses triggered on upload don't need guardrail checks because the question is system-generated and policy-safe by construction.
 
 ---
 
 ## 5. Security Architecture
 
-### JWT Token Architecture
+### JWT Authentication Flow
 
 ```
-Login
-  │  Access token (30 min) — stateless verification via SECRET_KEY
-  │  Refresh token (7 days) — JTI stored in Redis
-  ▼
-Protected API call
-  │  Decode JWT, verify signature and expiry
-  │  Extract: sub (user_id), tenant_id, role
-  ▼
-Access token expires
-  │  POST /auth/refresh with refresh token
-  │  Verify JTI exists in Redis (not revoked)
-  │  Revoke old JTI → issue new token pair (rotation)
-  ▼
-Logout
-  │  Delete JTI from Redis
-  │  Access token expires naturally — cannot be revoked (stateless)
+POST /auth/register or /auth/login
+  └── Returns: access_token (30min) + refresh_token (7 days)
+               Both tokens contain a JTI (JWT ID) — a unique UUID per token
+
+Protected Request
+  └── Authorization: Bearer {access_token}
+      └── Verify signature → decode claims → check JTI not in Redis blacklist
+
+Access Token Expired
+  └── POST /auth/refresh {refresh_token}
+      └── Verify refresh_token signature + expiry + JTI not in blacklist
+          └── DELETE old JTI from Redis (rotation — old token dead immediately)
+              └── Issue new access_token + new refresh_token
+
+POST /auth/logout {refresh_token}
+  └── ADD refresh_token JTI to Redis blacklist (SET with TTL = remaining token lifetime)
+      └── Token is permanently dead — even if someone captured it, it's worthless
 ```
 
-**Why refresh token rotation?** If a refresh token is stolen, it's single-use. The legitimate user's next refresh invalidates the stolen token and issues a new one. The attacker's copy is immediately rejected.
-
-### AES-256 Credential Encryption
-
-```
-User provides SQL credentials (host, port, user, password, db)
-    │
-    ▼
-encrypt_json(credentials, AES_KEY)  ← AES-256-GCM, random IV per encryption
-    │
-    ▼
-config_encrypted TEXT column in data_sources
-    │
-    ▼  At analysis time only:
-decrypt_json(config_encrypted, AES_KEY)
-    │
-    ▼
-connection_string injected into AnalysisState (never persisted)
-```
-
-The AES key is never stored in the database. Loss of the `AES_KEY` environment variable means all encrypted SQL credentials become permanently unrecoverable.
-
-### SQL Guard — 3 Layers
+### SQL Guard — 3 Layers in Sequence
 
 ```python
-# Layer 1: Allowlist — only SELECT and CTEs
-if not query.upper().startswith(("SELECT", "WITH")):
-    raise ValueError("Only SELECT queries are allowed")
+# services/api/app/infrastructure/sql_guard.py
 
-# Layer 2: Blocklist — dangerous keywords anywhere in query
-DANGEROUS = r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|TRUNCATE|...)\b"
-if re.search(DANGEROUS, query, re.IGNORECASE):
-    raise ValueError(f"Forbidden keyword detected: {match.group()}")
+def validate_sql(query: str) -> None:
+    stripped = query.strip().upper()
 
-# Layer 3: LLM Guardrail (Governance layer)
-# Semantic check against admin-defined natural language policies
-# e.g. "never expose salary or compensation data"
+    # Layer 1: Allowlist — must start with SELECT or WITH (CTEs)
+    if not stripped.startswith(("SELECT", "WITH")):
+        raise ValueError("Only SELECT queries are permitted")
+
+    # Layer 2: Blocklist — reject dangerous DML/DDL keywords anywhere
+    DANGEROUS_PATTERN = r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|TRUNCATE|CREATE|EXEC|EXECUTE|GRANT|REVOKE|MERGE|CALL|XP_|SP_)\b"
+    match = re.search(DANGEROUS_PATTERN, query, re.IGNORECASE)
+    if match:
+        raise ValueError(f"Forbidden SQL keyword: {match.group()}")
+
+    # Layer 3: LLM Guardrail (runs in governance worker, not here)
+    # Semantic policy enforcement: catches "comp" when policy says "never expose salary"
 ```
 
-Layer 3 catches what regex can't: semantic policy violations like asking for `compensation` even if the column is named `comp` or `pay`.
+Layer 3 runs in the Governance worker, not in the API Gateway. This allows the semantic check to be tenant-aware (loads active policies from PostgreSQL) without coupling the API layer to LLM calls.
 
-### Rate Limiting
+### AES-256-GCM Credential Encryption
 
-Uses `slowapi` (Starlette-compatible SlowAPI):
+```python
+# services/api/app/infrastructure/adapters/encryption.py
 
+def encrypt_json(data: dict, key: bytes) -> str:
+    """Encrypt a dict to a base64 string using AES-256-GCM."""
+    plaintext = json.dumps(data).encode()
+    nonce = os.urandom(12)         # 96-bit random nonce
+    cipher = AESGCM(key)
+    ciphertext = cipher.encrypt(nonce, plaintext, None)
+    return base64.b64encode(nonce + ciphertext).decode()
+
+def decrypt_json(encrypted: str, key: bytes) -> dict:
+    """Decrypt a base64 string back to a dict."""
+    raw = base64.b64decode(encrypted.encode())
+    nonce, ciphertext = raw[:12], raw[12:]
+    cipher = AESGCM(key)
+    plaintext = cipher.decrypt(nonce, ciphertext, None)
+    return json.loads(plaintext.decode())
 ```
-3/minute  — /auth/register   (prevent mass account creation)
-5/minute  — /auth/login      (prevent brute-force)
-200/minute — all other routes (global default)
+
+The `AES_KEY` env var is the only key material. It never enters the database. Loss of the key = permanent loss of all encrypted SQL credentials by design (no recovery path — this is the intended security property).
+
+Decrypted credentials are injected into `AnalysisState` in memory and passed directly to the database connection. They are never written to disk, logged, or returned in API responses.
+
+### Rate Limiting Implementation
+
+```python
+# services/api/app/infrastructure/middleware.py
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+
+@router.post("/auth/register")
+@limiter.limit("3/minute")
+async def register(...): ...
+
+@router.post("/auth/login")
+@limiter.limit("5/minute")
+async def login(...): ...
 ```
 
-Key function: `get_remote_address` — limits by IP. In production behind a load balancer, configure `X-Forwarded-For` trust appropriately.
+Production note: behind a load balancer, configure `X-Forwarded-For` trust to ensure limits are per end-user IP, not per load balancer IP.
 
 ---
 
 ## 6. Data Flow — Full Query Lifecycle
 
 ```
-User: "What are the top 5 products by revenue in Q4?"
+User types: "What are the top 5 products by revenue in Q4?"
   │
-  │  POST /api/v1/analysis/query
+  │  POST /api/v1/analysis/query { source_id, question, kb_id }
   ▼
 API Gateway
-  1. Verify JWT → extract user, tenant, role
-  2. Verify data source belongs to tenant
-  3. Create AnalysisJob (status=pending) → commit to PostgreSQL
-  4. governance_task.apply_async(args=[job_id], queue='governance')
-  5. Return {job_id, status="pending"} to client immediately
+  1. Verify JWT → extract user_id, tenant_id, role
+  2. Verify data_source.tenant_id == user.tenant_id
+  3. INSERT AnalysisJob(status="pending") → commit
+  4. governance_task.apply_async(args=[job_id], queue="governance")
+  5. Return { job_id, status="pending" } ← client gets this immediately
 
-Redis broker receives task
+Redis receives task
   │
   ▼
-Governance Worker (queue: governance)
+Governance Worker
   6. Fetch job + data source from PostgreSQL
-  7. Decrypt connection string from config_encrypted
-  8. intake_agent → classify intent="ranking", extract entities
-  9. guardrail_agent → check policies (no violations found)
-  10. pillar_task.apply_async(args=[job_id], queue='pillar.sql')
+  7. Decrypt config_encrypted → connection_string (in memory only)
+  8. intake_agent → intent="ranking", entities=["products","revenue","Q4"]
+  9. guardrail_agent → load tenant policies → no violations
+  10. pillar_task.apply_async(args=[job_id], queue="pillar.sql")
 
-SQL Worker (queue: pillar.sql)
-  11. Build LangGraph SQL pipeline with Redis checkpointer
-  12. data_discovery_agent → fetch schema, profile 5000 rows
-  13. analysis_generator → generate SQL:
-      "SELECT product_name, SUM(revenue) AS total
-       FROM sales WHERE quarter='Q4'
-       GROUP BY product_name ORDER BY total DESC LIMIT 5"
-  14. route_after_generator → HITL (user_id != auto_analysis)
-  15. Job status updated to "awaiting_approval"
-  16. Graph INTERRUPTS at human_approval node
-      State saved to Redis checkpointer
+SQL Worker
+  11. Build LangGraph graph with AsyncRedisSaver checkpointer
+  12. [data_discovery] → schema: tables=sales,products; low_cardinality: quarter=["Q1","Q2","Q3","Q4"]
+  13. [analysis_generator] →
+      SELECT p.name, SUM(s.revenue) AS total
+      FROM sales s JOIN products p ON s.product_id = p.id
+      WHERE s.quarter = 'Q4'
+      GROUP BY p.name ORDER BY total DESC LIMIT 5
+  14. route_after_generator → user job → [human_approval] INTERRUPT
+  15. State serialized to Redis. Job status → "awaiting_approval"
+  16. Worker exits cleanly.
 
 Client polls GET /analysis/{job_id}
-  Returns: {status="awaiting_approval", generated_sql="SELECT..."}
+  ← { status: "awaiting_approval", generated_sql: "SELECT p.name..." }
 
-Admin reviews SQL in UI and clicks Approve
+Admin reviews SQL in UI. Clicks "Approve".
   │
   │  POST /api/v1/analysis/{job_id}/approve
   ▼
 API Gateway
-  17. Fetch job, verify admin role
-  18. Update job status to "running"
-  19. Update LangGraph state: {approval_granted: True} via checkpointer
-  20. pillar_task.apply_async(args=[job_id], queue='pillar.sql')
+  17. Verify admin role
+  18. Update job status → "running"
+  19. Patch LangGraph state in Redis: { approval_granted: true }
+  20. pillar_task.apply_async(args=[job_id], queue="pillar.sql")
 
-SQL Worker resumes from checkpoint
-  21. execution node → run SQL against live database
-      row_count=5 → no zero-row reflection needed
-  22. hybrid_fusion → fetch PDF KB context (kb_id=null → skip)
-  23. visualization_agent → generate Plotly bar chart spec
-  24. insight_agent → "Product A led Q4 with $2.3M..."
-  25. verifier_agent → insight matches data ✓
-  26. recommendation_agent → 3 action items
-  27. memory_persistence → save to insight_memory
-  28. output_assembler → build final result JSON
-  29. Save AnalysisResult to PostgreSQL
-  30. Update job status to "done"
+SQL Worker resumes from Redis checkpoint
+  21. [execution] → runs SELECT → 5 rows, row_count=5
+  22. [hybrid_fusion] → kb_id=null → skip Qdrant
+  23. [visualization] → Plotly bar chart: products vs revenue
+  24. [insight] → "Product A led Q4 with $2.3M, 28% of quarterly total..."
+  25. [verifier] → insight references row values ✓
+  26. [recommendation] → ["Prioritize Product A inventory...", ...]
+  27. [memory_persistence] → save question+SQL to insight_memory
+  28. [output_assembler] → build AnalysisResult JSON
+  29. INSERT AnalysisResult → UPDATE job status → "done"
 
-Client polls GET /analysis/{job_id}
-  Returns: {status="done"}
-
+Client polls GET /analysis/{job_id} ← { status: "done" }
 Client fetches GET /analysis/{job_id}/result
-  Returns: charts, insight_report, recommendations, data_snapshot
+  ← { charts, insight_report, recommendations, data_snapshot }
 ```
+
+Total time (typical): 8–18 seconds from query submission to result, excluding HITL pause.
 
 ---
 
@@ -447,83 +498,150 @@ tenants ──< users
         ──< knowledge_bases
         ──< policies
 
-analysis_jobs >── knowledge_bases (optional FK for hybrid fusion)
+analysis_jobs >── knowledge_bases (optional FK for hybrid PDF fusion)
+analysis_jobs >── users (FK: user_id)
 ```
 
 **Key design decisions:**
 
-`config_encrypted TEXT` on `data_sources` — credentials are stored as a single encrypted blob rather than individual columns. This means the encryption boundary is clean: either all credential fields are encrypted, or none are.
+`config_encrypted TEXT` — credentials stored as a single encrypted blob. Encryption boundary is clean: all credential fields encrypted together, or none.
 
-`thinking_steps JSON` on `analysis_jobs` — every LangGraph node output is captured and stored. This powers the "Reasoning" UI panel that shows users what the agent was thinking, and provides an audit trail for debugging failed jobs.
+`thinking_steps JSON` — every LangGraph node output captured per job. Powers the "Reasoning" panel in the UI (audit trail + user trust).
 
-`auto_analysis_json JSON` on `data_sources` — 5 pre-generated analyses stored permanently on upload. These are computed in the background by the `auto_analysis` service user (bypasses HITL) and displayed immediately when the user opens a data source. First-impression speed matters.
+`auto_analysis_json JSON` — 5 pre-generated analyses computed on upload. Displayed instantly on first open. First-impression latency matters for adoption.
+
+`low_cardinality_values` (in `schema_json`) — sampled enum values per column, used by zero-row reflection to detect case mismatches without re-querying the database.
 
 ---
 
 ## 8. Infrastructure & Deployment
 
-### Docker Compose Stack (9 containers)
+### Docker Compose — 12 Services
 
 ```yaml
-postgres    # PostgreSQL 16 — metadata database
-redis       # Redis Stack — broker + cache + JWT blacklist
-qdrant      # Qdrant — vector database for PDF RAG
-api         # FastAPI gateway on :8002
-governance  # Celery worker — governance queue
-worker-sql  # Celery worker — pillar.sql queue
-worker-csv  # Celery worker — pillar.csv queue
-worker-json # Celery worker — pillar.json queue
-worker-pdf  # Celery worker — pillar.pdf queue
-exporter    # Celery worker — export queue
+# docker-compose.yml
+services:
+  postgres:      # PostgreSQL 16 — metadata database
+  redis:         # Redis Stack — broker + cache + JWT blacklist + HITL checkpoints
+  qdrant:        # Qdrant — vector database for PDF ColPali RAG
+  api:           # FastAPI gateway :8002 + static SPA
+  governance:    # Celery worker — governance queue
+  worker-sql:    # Celery worker — pillar.sql queue
+  worker-csv:    # Celery worker — pillar.csv queue
+  worker-json:   # Celery worker — pillar.json queue
+  worker-pdf:    # Celery worker — pillar.pdf queue
+  exporter:      # Celery worker — export queue
+  prometheus:    # Metrics collection :9090
+  grafana:       # Dashboards :3000
 ```
 
-All workers share the `tenant_uploads` volume for file access. All workers share the same PostgreSQL database via `DATABASE_URL`. Redis is the only inter-service communication channel.
+All workers share `tenant_uploads` volume for file access. Redis is the only inter-service communication channel.
 
-### Kubernetes Production Stack
+### Kubernetes — Production
 
 Production adds:
-- **HPA (Horizontal Pod Autoscaler):** scales analysis workers based on queue depth
-- **PVC (Persistent Volume Claims):** PostgreSQL and Qdrant data persistence
-- **Ingress:** TLS termination + routing
-- **Namespace isolation:** all resources in `analyst-ai` namespace
-- **Secrets:** Kubernetes Secrets for `GROQ_API_KEY`, `SECRET_KEY`, `AES_KEY`
+- **HPA:** analysis workers auto-scale based on Celery queue depth (custom metric via Prometheus adapter)
+- **PVC:** PostgreSQL and Qdrant data persistence across pod restarts
+- **Ingress:** TLS termination + path routing
+- **Namespace:** all resources in `analyst-ai` namespace
+- **Secrets:** Kubernetes Secrets for `GROQ_API_KEY`, `SECRET_KEY`, `AES_KEY` (never in ConfigMap)
 
 ### Self-Healing Database Migration
 
-The API gateway's `lifespan` runs on every startup:
-
 ```python
-# 1. Create missing tables (idempotent)
-await conn.run_sync(Base.metadata.create_all)
+# services/api/app/main.py — lifespan context manager
 
-# 2. Add missing columns (idempotent)
-await conn.execute("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS generated_sql TEXT NULL")
-await conn.execute("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS thinking_steps JSON NULL")
-# ... etc
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        # Step 1: Create all tables if they don't exist (idempotent)
+        await conn.run_sync(Base.metadata.create_all)
+
+        # Step 2: Add new columns to existing tables (idempotent)
+        await conn.execute(text(
+            "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS generated_sql TEXT NULL"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS thinking_steps JSON NULL"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS auto_analysis_status VARCHAR(10) NULL"
+        ))
+    yield
 ```
 
-This means adding a new column to a model requires only deploying the new code — no manual migration step, no downtime.
+Adding a new column requires only deploying new code — no migration script, no downtime, no rollback risk.
 
 ---
 
-## 9. Key Design Decisions
+## 9. Observability Stack
+
+### Prometheus
+
+Scrapes metrics from the API Gateway at `/metrics` (Prometheus format via `prometheus-fastapi-instrumentator`):
+
+```
+analyst_api_requests_total{method, endpoint, status_code}
+analyst_api_request_duration_seconds{method, endpoint}
+analyst_jobs_total{status, intent, source_type}
+analyst_jobs_duration_seconds{pipeline, node}
+analyst_queue_depth{queue_name}
+```
+
+### Grafana
+
+Pre-provisioned dashboards (no manual setup):
+
+| Dashboard | Key Panels |
+|---|---|
+| **Platform Overview** | Active jobs, error rate, p50/p95/p99 latency, queue depths |
+| **Pipeline Performance** | Per-node latency breakdown (SQL pipeline: 11 nodes) |
+| **Tenant Analytics** | Jobs per tenant, data source distribution, intent breakdown |
+| **Security** | Rate limit hits, auth failures, JWT revocations |
+
+Access: `http://localhost:3000` — admin/admin (change in production).
+
+### Structured Logging
+
+All services emit JSON logs via `structlog`:
+
+```json
+{
+  "timestamp": "2025-03-20T09:05:12.334Z",
+  "level": "info",
+  "service": "worker-sql",
+  "tenant_id": "7c9e6679-...",
+  "job_id": "job-uuid",
+  "node": "execution",
+  "row_count": 5,
+  "duration_ms": 423
+}
+```
+
+---
+
+## 10. Key Design Decisions
 
 ### Why Celery queues between layers instead of HTTP?
 
-HTTP between microservices creates tight coupling — if the governance service is down, analysis submissions fail immediately. Celery queues decouple producers from consumers: the API can accept jobs even when workers are restarting. Workers can be scaled independently by increasing `--concurrency`. Dead-letter queues can catch and retry failed tasks.
+HTTP between microservices creates tight coupling — if governance is down, analysis submissions fail immediately. Celery queues decouple producers from consumers: the API accepts jobs even when workers are restarting. Workers scale independently by adjusting `--concurrency`. Dead-letter queues catch and retry failed tasks without any code changes.
 
 ### Why one database for all tenants?
 
-Multi-database multi-tenancy (one DB per tenant) scales to thousands of tenants but requires a connection pool of thousands of connections, schema management per tenant, and complex migration orchestration. Single-database with `tenant_id` scoping scales to hundreds of tenants with standard connection pooling and a single migration run. The isolation guarantee is the same — every query is WHERE-scoped. The only risk is a `tenant_id` filter being accidentally omitted, which is why every query goes through a central `get_current_user` dependency that enforces the scope.
+Multi-database tenancy (one DB per tenant) scales to thousands of tenants but requires a connection pool of thousands of connections, per-tenant migration management, and complex orchestration. Single-database with `tenant_id` scoping scales to hundreds of tenants with standard pooling and a single migration run. The isolation guarantee is equivalent — every query is WHERE-scoped. The only risk is an accidentally-omitted `tenant_id` filter, which is why all queries go through a central `get_current_user` dependency that enforces the scope.
 
 ### Why Redis checkpointer for HITL?
 
-The HITL pause can last minutes or hours (until an admin approves). A Celery task cannot be "paused" — it must terminate and resume. LangGraph's `AsyncRedisSaver` serializes the full graph state to Redis when `interrupt_before=["human_approval"]` fires. On resume (after approval), the graph is reconstructed from the checkpoint and continues execution from the exact node where it paused. This is what makes HITL durable across worker restarts.
+A Celery task cannot be "paused" — it must terminate and resume. LangGraph's `AsyncRedisSaver` serializes the full graph state to Redis when `interrupt_before=["human_approval"]` fires. On resume (POST /approve), the graph is reconstructed from the checkpoint and continues from exactly where it paused. This makes HITL durable across worker restarts, pod evictions, and cluster reboots.
 
-### Why AES-256 for SQL credentials instead of a secrets manager?
+### Why AES-256-GCM instead of a secrets manager?
 
-A secrets manager (AWS Secrets Manager, HashiCorp Vault) is the right answer for production at scale. AES-256 in the database is a reasonable interim choice for an NTI project: it's production-grade encryption, it's simple to implement and audit, and it has zero external dependencies. The migration path to a secrets manager is straightforward — replace `encrypt_json/decrypt_json` with secrets manager calls.
+A secrets manager (AWS Secrets Manager, HashiCorp Vault) is the right answer at scale. AES-256-GCM in the database is a defensible interim choice: production-grade encryption, zero external dependencies, simple to audit. The migration path is clean — replace `encrypt_json/decrypt_json` with secrets manager SDK calls.
 
-### Why Qdrant multi-vector (ColPali) for PDFs?
+### Why ColPali multi-vector for PDF RAG?
 
-Traditional PDF RAG chunks text and embeds it. ColPali embeds PDF pages as image patches — it preserves visual layout, tables, charts, and diagrams that text extraction destroys. For enterprise documents (financial reports, technical manuals), the layout often carries as much meaning as the text. Multi-vector indexing in Qdrant stores both text embeddings and image patch embeddings per page, enabling queries that find information from charts that have no adjacent text labels.
+Traditional PDF RAG chunks text and embeds it. ColPali embeds PDF pages as image patches — preserving visual layout, tables, charts, and diagrams that text extraction destroys. For enterprise documents (financial reports, technical manuals), layout carries as much meaning as text. Multi-vector indexing in Qdrant stores both text embeddings and image patch embeddings per page, enabling queries that find information from charts with no adjacent text labels.
+
+### Why Groq (Llama) instead of GPT-4?
+
+Groq's inference hardware delivers sub-second token generation for Llama-3.1-8B — critical for an interactive analysis tool where users are waiting. The 8B model handles SQL generation, insight writing, and policy checking adequately for the task complexity. The 70B model is available as a config override for higher-stakes production deployments. The LLM provider is abstracted behind LangChain, making a future swap (OpenAI, Anthropic, local Ollama) a one-line config change.

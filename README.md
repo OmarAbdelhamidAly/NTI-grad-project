@@ -11,62 +11,64 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Redis](https://img.shields.io/badge/Redis-Queue%20%2B%20Cache-DC382D?logo=redis&logoColor=white)](https://redis.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose%20%2B%20K8s-2496ED?logo=docker&logoColor=white)](https://docker.com)
+[![Groq](https://img.shields.io/badge/Groq-Llama--3.1%2F3.3-F54034)](https://console.groq.com)
+[![Qdrant](https://img.shields.io/badge/Qdrant-ColPali%20RAG-4F46E5)](https://qdrant.tech)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 <br/>
 
-*Connect your CSV, SQL database, JSON, or PDF. Ask a question in plain English. Get back a fully reasoned, chart-backed, cited insight — automatically.*
+> *Connect your CSV, SQL database, JSON, or PDF. Ask a question in plain English. Get back a fully reasoned, chart-backed, cited insight — automatically.*
+
+<br/>
+
+**[🚀 Quick Start](#-getting-started) · [🏗️ Architecture](#-system-architecture) · [🔒 Security](#-security-architecture) · [📡 API Docs](NTI_API_DOCUMENTATION.md) · [🎬 Watch the Demo](#-demo)**
 
 </div>
 
 ---
 
-## 📋 Table of Contents
-
-1. [What It Does](#-what-it-does)
-2. [System Architecture](#-system-architecture)
-3. [Repository Structure](#-repository-structure)
-4. [Services Deep-Dive](#-services-deep-dive)
-5. [LangGraph Pipelines](#-langgraph-pipelines)
-6. [Security Architecture](#-security-architecture)
-7. [Database Schema](#-database-schema)
-8. [Deployment](#-deployment)
-9. [Getting Started](#-getting-started)
-10. [Configuration](#-configuration)
-11. [Tech Stack](#-tech-stack)
-
----
-
 ## 🎯 What It Does
 
-DataAnalyst.AI is a **multi-tenant SaaS platform** that turns raw data into executive-grade insights through an autonomous multi-agent pipeline. Users connect a data source, ask a natural-language question, and the system handles everything else — schema discovery, query generation, self-healing on failure, visualization, insight synthesis, and export.
+**DataAnalyst.AI** is a production-grade, multi-tenant SaaS platform that transforms raw enterprise data into executive-quality insights through a fully autonomous multi-agent AI pipeline.
 
-**Supported data sources:**
-- **CSV / XLSX / SQLite** — upload flat files, get instant analysis
-- **PostgreSQL / MySQL** — connect enterprise databases via encrypted credentials
-- **JSON** — structured event or log data
-- **PDF** — unstructured documents via Qdrant vector search
+A user connects a data source, types a natural-language question, and the system handles everything else — schema discovery, query generation, self-healing on failure, visualization, insight synthesis, and export — with **zero manual intervention**.
 
-**What makes it different:**
-- **Zero-Row Reflection** — if a SQL query returns empty results, the agent detects the failure, analyzes the data distribution, and rewrites the query automatically
-- **Human-in-the-Loop (HITL)** — SQL queries pause for admin approval before execution against live databases
-- **Hybrid Fusion** — SQL results are enriched with context from a linked PDF knowledge base
-- **3-Layer Security Guardrails** — `EXPLAIN`-cost analysis, strict regex injection prevention, and LLM-based policy enforcement
-- **Multi-Tenant Isolation** — every tenant's data, credentials, and jobs are fully isolated at the database level
+### Supported Data Sources
+
+| Source | Connection Method | Notes |
+|---|---|---|
+| **CSV / XLSX / SQLite** | File upload | Auto-profiled on upload |
+| **PostgreSQL / MySQL** | Encrypted connection string | AES-256 credentials at rest |
+| **JSON** | File upload | Structured event or log data |
+| **PDF** | File upload | Unstructured documents via ColPali RAG |
+
+### What Makes It Different
+
+| Feature | Description |
+|---|---|
+| 🔁 **Zero-Row Reflection** | If a SQL query returns 0 results, the agent detects the failure, analyzes data distribution, identifies case mismatches, and auto-rewrites the query (up to 3 retries) |
+| 👁️ **Human-in-the-Loop (HITL)** | SQL queries against live databases pause for admin approval before execution. State is checkpointed to Redis — survives worker restarts |
+| 🧬 **Hybrid Fusion** | SQL results are enriched with context retrieved from a linked PDF knowledge base (ColPali multi-vector Qdrant) |
+| 🛡️ **3-Layer Security Guardrails** | `EXPLAIN`-cost analysis + strict regex injection prevention + LLM-based semantic policy enforcement |
+| 🏢 **Multi-Tenant Isolation** | Every tenant's data, credentials, and jobs are fully isolated at the database query level (`tenant_id` scope on every operation) |
+| ⚡ **Auto-Analysis on Upload** | 5 pre-generated analyses are computed in the background the moment a data source is connected — users see instant insights on first open |
+| 🧠 **Insight Memory** | Successful SQL queries are saved as golden examples, improving future query generation through in-context learning |
+| 📊 **Reasoning Transparency** | Every LangGraph node output is captured in `thinking_steps` and surfaced in the UI — users see exactly what the agent was thinking |
 
 ---
 
 ## 🏗️ System Architecture
 
-The platform is built as a **4-layer microservices stack** orchestrated by Docker Compose (and Kubernetes for production):
+The platform is built as a **4-layer microservices stack** orchestrated by Docker Compose (Kubernetes for production):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           END USER / ADMIN                              │
-│                    Glassmorphism SPA (Vanilla JS + Plotly.js)           │
+│              Glassmorphism SPA (Vanilla JS + Plotly.js)                 │
 └──────────────────────────────────┬──────────────────────────────────────┘
-                                   │ HTTPS
+                                   │ HTTPS :8002
 ┌──────────────────────────────────▼──────────────────────────────────────┐
-│  LAYER 1 — API GATEWAY  (services/api  · FastAPI · :8002)               │
+│  LAYER 1 — API GATEWAY  (services/api · FastAPI · :8002)                │
 │                                                                          │
 │  Auth (JWT + refresh rotation)  · Rate limiting · Security headers      │
 │  Multi-tenant routing · AES-256 credential encryption · REST endpoints  │
@@ -111,8 +113,11 @@ SHARED INFRASTRUCTURE
 ─────────────────────────────────────────────────────────────────────────
 PostgreSQL :5433  — Metadata: tenants, users, jobs, results, policies
 Redis :6379       — Celery broker + result backend + JWT token blacklist
+                    + LangGraph HITL checkpoints (AsyncRedisSaver)
 Qdrant :6333      — Vector DB for PDF knowledge base (multi-vector ColPali)
 ```
+
+> **Full C4 diagrams** (Context → Container → Component) available in [`NTI_C4_DIAGRAMS.md`](NTI_C4_DIAGRAMS.md).
 
 ---
 
@@ -127,7 +132,7 @@ NTI-grad-project/
 │   │       ├── main.py           # FastAPI app factory + self-healing DB migration
 │   │       ├── routers/          # auth · users · data_sources · analysis
 │   │       │                     # knowledge · policies · metrics · reports
-│   │       ├── models/           # SQLAlchemy: tenant · user · data_source
+│   │       ├── models/           # SQLAlchemy ORM: tenant · user · data_source
 │   │       │                     # analysis_job · analysis_result · knowledge · policy
 │   │       ├── schemas/          # Pydantic request/response schemas
 │   │       ├── use_cases/        # Business logic: run_pipeline · auto_analysis · export
@@ -136,10 +141,10 @@ NTI-grad-project/
 │   │       │   ├── security.py   # JWT access/refresh tokens + bcrypt password hashing
 │   │       │   ├── sql_guard.py  # 3-layer SQL injection prevention
 │   │       │   ├── middleware.py # CORS · rate limiting · security headers · logging
-│   │       │   ├── token_blacklist.py # Redis-backed JWT revocation
+│   │       │   ├── token_blacklist.py # Redis-backed JWT revocation (JTI)
 │   │       │   └── adapters/
-│   │       │       ├── encryption.py  # AES-256 for SQL credentials at rest
-│   │       │       ├── qdrant.py      # Vector DB adapter
+│   │       │       ├── encryption.py  # AES-256-GCM for SQL credentials at rest
+│   │       │       ├── qdrant.py      # Vector DB adapter (multi-vector ColPali)
 │   │       │       └── storage.py     # Tenant-scoped file storage
 │   │       ├── modules/shared/agents/ # Shared: intake · guardrail · output_assembler
 │   │       └── static/           # Glassmorphism SPA (HTML + CSS + JS)
@@ -149,26 +154,36 @@ NTI-grad-project/
 │   │       ├── workflow.py       # LangGraph: intake → [clarify?] → guardrail
 │   │       └── agents/           # intake_agent · guardrail_agent
 │   │
-│   ├── worker-sql/               # Layer 3: SQL analysis pipeline
+│   ├── worker-sql/               # Layer 3: SQL analysis pipeline (11-node)
 │   │   └── app/modules/sql/
-│   │       ├── workflow.py       # LangGraph SQL graph (11 nodes)
-│   │       ├── agents/           # data_discovery · analysis · visualization
-│   │       │                     # insight · verifier · recommendation
+│   │       ├── workflow.py       # LangGraph SQL graph
+│   │       ├── agents/           # data_discovery · analysis_generator · execution
+│   │       │                     # hybrid_fusion · visualization · insight
+│   │       │                     # verifier · recommendation · memory_persistence
 │   │       ├── tools/            # run_sql_query · sql_schema_discovery
 │   │       └── utils/            # golden_sql · insight_memory · schema_mapper
 │   │                             # schema_selector · sql_validator
 │   │
-│   ├── worker-csv/               # Layer 3: CSV/flat-file analysis pipeline
+│   ├── worker-csv/               # Layer 3: CSV/flat-file analysis pipeline (7-node)
 │   │   └── app/modules/csv/
-│   │       ├── workflow.py       # LangGraph CSV graph (7 nodes)
+│   │       ├── workflow.py       # LangGraph CSV graph
 │   │       ├── agents/           # data_discovery · data_cleaning · analysis
 │   │       │                     # visualization · insight · recommendation
 │   │       └── tools/            # clean_dataframe · compute_correlation
 │   │                             # compute_ranking · compute_trend · profile_dataframe
 │   │
 │   ├── worker-json/              # Layer 3: JSON analysis pipeline
-│   ├── worker-pdf/               # Layer 3: PDF RAG pipeline (ColPali multi-vector)
-│   └── exporter/                 # Layer 4: Async export service
+│   ├── worker-pdf/               # Layer 3: PDF RAG (ColPali multi-vector)
+│   └── exporter/                 # Layer 4: Async PDF/XLSX/JSON export service
+│
+├── 📁 frontend/                  # React + TypeScript SPA (Vite)
+│   └── src/                      # Component-based UI, Plotly.js charts
+│
+├── 📁 grafana/                   # Grafana dashboards + provisioning
+│   └── provisioning/             # Datasources + pre-built dashboards
+│
+├── 📁 prometheus/                # Prometheus scrape config
+│   └── prometheus.yml
 │
 ├── 📁 k8s/                       # Kubernetes manifests (production)
 │   ├── namespace.yaml
@@ -176,29 +191,28 @@ NTI-grad-project/
 │   ├── worker-deployment.yaml
 │   ├── postgres-statefulset.yaml
 │   ├── redis-deployment.yaml
-│   ├── hpa.yaml                  # Horizontal Pod Autoscaler
+│   ├── hpa.yaml                  # Horizontal Pod Autoscaler (queue-depth based)
 │   ├── ingress.yaml
 │   ├── pvc.yaml
 │   ├── configmap.yaml
 │   └── secrets.yaml
 │
-├── 📁 tests/                     # Test suite
+├── 📁 tests/                     # Test suite (pytest + httpx)
 │   ├── test_auth.py
 │   ├── test_users.py
 │   ├── test_data_sources.py
-│   ├── test_analysis.py (csv + sql pipelines)
+│   ├── test_analysis.py          # CSV + SQL pipeline integration tests
 │   ├── test_health.py
 │   └── test_architecture.py
 │
 ├── 📁 alembic/                   # Database migrations
 │   └── versions/                 # 001_initial · add_auto_analysis_fields
 │
-├── docker-compose.yml            # 9-service local stack
-├── .env.example                  # All required environment variables
-├── SQL_TEAM.md                   # SQL pipeline engineering guide
-├── CSV_TEAM.md                   # CSV pipeline engineering guide
-├── DEPLOYMENT.md                 # Docker + Kubernetes deployment guide
-└── ADMIN_GUIDE.md                # Platform administration reference
+├── docker-compose.yml            # 10-service local stack (+ Prometheus + Grafana)
+├── .env.example                  # All required environment variables documented
+├── NTI_API_DOCUMENTATION.md      # Full REST API reference
+├── NTI_ARCHITECTURE.md           # Architecture deep-dive
+└── NTI_C4_DIAGRAMS.md            # C4 diagrams (Context → Container → Component)
 ```
 
 ---
@@ -207,66 +221,71 @@ NTI-grad-project/
 
 ### Layer 1 — API Gateway (`services/api`)
 
-The single public entry point for all client requests. Never executes analysis directly — it validates, persists, and dispatches.
-
-**Key responsibilities:**
+The single public entry point. Never executes analysis directly — validates, persists, and dispatches.
 
 | Module | Role |
 |---|---|
-| `routers/auth.py` | Register, login, refresh, logout with JWT rotation and Redis revocation |
+| `routers/auth.py` | Register, login, refresh, logout — JWT rotation + Redis JTI revocation |
 | `routers/data_sources.py` | Upload CSV/XLSX/SQLite, connect SQL via AES-256 encrypted credentials, auto-profile schema |
-| `routers/analysis.py` | Submit queries, poll job status, fetch results, approve HITL jobs |
-| `routers/knowledge.py` | Upload PDFs → Qdrant multi-vector indexing for hybrid SQL+PDF fusion |
+| `routers/analysis.py` | Submit queries, poll job status, fetch results, approve HITL SQL jobs |
+| `routers/knowledge.py` | Upload PDFs → Qdrant multi-vector ColPali indexing for hybrid SQL+PDF fusion |
 | `routers/policies.py` | Admin-managed guardrail rules (e.g. "never expose PII columns") |
 | `routers/metrics.py` | Job analytics, latency tracking, tenant usage stats |
 | `routers/reports.py` | Export results as PDF/XLSX/JSON (dispatched to exporter worker) |
-| `infrastructure/security.py` | JWT access (30min) + refresh (7 days) tokens, bcrypt passwords, JTI-based revocation |
-| `infrastructure/sql_guard.py` | 3-layer read-only enforcement: regex + keyword + EXPLAIN cost |
-| `infrastructure/middleware.py` | CORS, rate limiting (200/min global, 5/min login, 3/min register), security headers |
-| `infrastructure/adapters/encryption.py` | AES-256 GCM encryption for SQL connection strings stored in DB |
+| `infrastructure/security.py` | JWT access (30min) + refresh (7 days) tokens, bcrypt passwords |
+| `infrastructure/sql_guard.py` | 3-layer read-only enforcement: SELECT-only + regex + EXPLAIN cost |
+| `infrastructure/middleware.py` | CORS, rate limiting, security headers (CSP, X-Frame-Options, etc.) |
+| `infrastructure/adapters/encryption.py` | AES-256-GCM encryption for SQL connection strings stored in DB |
 
-**Multi-tenant isolation:** every database query is scoped by `tenant_id`. A user from tenant A cannot see, modify, or even detect the existence of tenant B's data sources, jobs, or results.
+**Multi-tenant isolation:** every database query is scoped by `tenant_id` at the SQLAlchemy layer. A user from Tenant A cannot see, modify, or detect Tenant B's data.
 
-**Self-healing startup:** the `lifespan` context manager runs `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ADD COLUMN IF NOT EXISTS` on every startup — safe to redeploy with zero downtime.
+**Self-healing startup:** the `lifespan` context manager runs idempotent `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ADD COLUMN IF NOT EXISTS` on every deploy — zero-downtime schema evolution.
 
 ---
 
 ### Layer 2 — Governance (`services/governance`)
 
-A dedicated Celery worker on the `governance` queue. Every analysis job passes through here first before reaching any execution pillar.
+Every analysis job passes through here first. No job reaches an execution pillar without governance approval.
 
-**LangGraph flow:**
 ```
 START → [intake] → check_intake → [guardrail] → END
                         │
-                        └── clarification_needed → END (asks user)
+                        └── clarification_needed → END (asks user to rephrase)
 ```
 
-- **Intake Agent:** Classifies intent (`trend | comparison | ranking | correlation | anomaly`), extracts entities, detects ambiguous questions
-- **Guardrail Agent:** Enforces admin-defined policies, checks for PII exposure, validates the question is safe to execute
-
-If intake detects ambiguity, the job is halted and the user is asked to rephrase. If guardrail flags a policy violation, the job is rejected with a human-readable explanation.
+- **Intake Agent:** classifies intent (`trend | comparison | ranking | correlation | anomaly`), extracts entities, detects ambiguous questions, assigns complexity index (1–5)
+- **Guardrail Agent:** enforces admin-defined natural-language policies, checks for PII exposure, validates semantic safety
 
 ---
 
 ### Layer 3 — Execution Pillars
 
-Four specialized Celery workers, each on its own queue:
+Four specialized Celery workers, each independently scalable:
 
-| Worker | Queue | Concurrency | Pipeline |
+| Worker | Queue | Pipeline Nodes | Key Capabilities |
 |---|---|---|---|
-| `worker-sql` | `pillar.sql, pillar.sqlite, pillar.postgresql` | 4 | 11-node LangGraph SQL graph |
-| `worker-csv` | `pillar.csv` | 4 | 7-node LangGraph CSV graph |
-| `worker-json` | `pillar.json` | 4 | JSON analysis pipeline |
-| `worker-pdf` | `pillar.pdf` | 4 | ColPali multi-vector RAG |
-
-Each worker is a completely independent Docker container with its own `requirements.txt` — the SQL worker can scale to 10 replicas without affecting CSV processing.
+| `worker-sql` | `pillar.sql / pillar.sqlite / pillar.postgresql` | 11 | Schema discovery, HITL approval, zero-row reflection, hybrid PDF fusion, insight memory |
+| `worker-csv` | `pillar.csv` | 7 | Auto data cleaning, quality scoring, statistical analysis |
+| `worker-json` | `pillar.json` | 5 | Structured event/log analysis |
+| `worker-pdf` | `pillar.pdf` | 4 | ColPali multi-vector RAG (text + image patches) |
 
 ---
 
 ### Layer 4 — Exporter (`services/exporter`)
 
-Async export worker on the `export` queue. Generates PDF/XLSX/JSON reports from completed analysis results. Results are written to the shared `tenant_uploads` volume and served via signed download URLs.
+Async export worker. Generates PDF/XLSX/JSON reports from completed results. Writes to tenant-scoped shared volume, serves via signed download URLs.
+
+---
+
+### Observability — Prometheus + Grafana
+
+The stack ships with a pre-configured observability layer:
+
+- **Prometheus** scrapes API metrics (job counts, latencies, error rates, queue depths)
+- **Grafana** dashboards provisioned automatically — no manual setup
+- **Celery Flower** available for real-time task monitoring
+
+Access Grafana at `http://localhost:3000` (admin/admin) after `docker compose up`.
 
 ---
 
@@ -274,87 +293,66 @@ Async export worker on the `export` queue. Generates PDF/XLSX/JSON reports from 
 
 ### SQL Pipeline (11 nodes)
 
-The most complex pipeline in the system. Handles enterprise databases with schema discovery, HITL approval, self-healing, hybrid knowledge base fusion, and quality verification.
-
 ```
 START
   │
   ▼
-[data_discovery]
-  │  Schema mapper: tables, columns, PKs, FKs, sample values, low-cardinality enums
-  │  Parallel table profiling · Mermaid ERD generation · Schema compression
+[data_discovery]         ← Schema mapper: tables, columns, PKs, FKs, sample values,
+  │                         low-cardinality enums, Mermaid ERD, schema compression
   ▼
-[analysis_generator]  ← ReAct agent with golden SQL examples
-  │  Generates ANSI SELECT query + execution plan
-  │  Tools: sql_schema_discovery, run_sql_query (dry-run mode)
+[analysis_generator]     ← ReAct agent + golden SQL examples from insight_memory
+  │                         Generates ANSI SELECT + execution plan
   ▼
 route_after_generator
-  ├── approval_granted=True OR auto_analysis → [execution]
-  └── default → [human_approval]  ← HITL INTERRUPT (Redis checkpointer)
-                      │
-                      ▼ admin clicks "Approve" in UI
-                 [execution]
-                      │  Runs approved SQL, fetches up to 1,000 rows
-                      │
-                      ▼ Zero-Row Reflection
-                 route_after_execution
-                  ├── reflection_context → [backtrack]
-                  │       │  Analyzes failure, adds case-sensitivity hint
-                  │       └──► [analysis_generator]  (retry loop, max 3)
-                  └── success → [hybrid_fusion]
-                                    │  Fetches PDF knowledge base context
-                                    │  related to SQL results (Qdrant)
-                                    ▼
-                              [visualization]  → Plotly chart JSON
-                                    ▼
-                               [insight]       → 3-5 sentence executive summary
-                                    ▼
-                               [verifier]      → Quality gate: checks insight
-                                    ▼           matches the data
-                            [recommendation]   → 3 actionable next steps
-                                    ▼
-                          [memory_persistence] → Saves to insight_memory for
-                                    ▼           future golden SQL examples
-                          [output_assembler]   → Final JSON output
-                                    ▼
-                                   END
+  ├── auto_analysis → [execution]              (bypasses HITL)
+  └── user job       → [human_approval]        ← HITL INTERRUPT (Redis checkpointer)
+                            │ admin approves in UI
+                            ▼
+                       [execution]             ← Runs approved SQL, fetches ≤1,000 rows
+                            │
+                       route_after_execution
+                        ├── zero_rows → [backtrack] → [analysis_generator]  (max 3 retries)
+                        └── success  → [hybrid_fusion]  ← Qdrant PDF context enrichment
+                                            ▼
+                                     [visualization]    ← Plotly chart JSON
+                                            ▼
+                                      [insight]         ← 3–5 sentence executive summary
+                                            ▼
+                                      [verifier]        ← Quality gate: insight vs data
+                                            ▼
+                                   [recommendation]     ← 3 actionable next steps
+                                            ▼
+                                  [memory_persistence]  ← Save to golden SQL examples
+                                            ▼
+                                  [output_assembler]    ← Final JSON output
+                                            ▼
+                                           END
 ```
 
 **Self-healing mechanisms:**
-- **Zero-Row Reflection:** detects `row_count=0`, extracts SQL literals, compares against sampled `low_cardinality_values` for case mismatches, injects a correction hint into the next generation cycle
-- **Backtrack Node:** on any error or policy violation, adds a strategic hint and routes back to `analysis_generator` (max 3 retries)
-- **Verifier Agent:** quality control gate between insight and recommendation — ensures the insight is actually supported by the data
+- **Zero-Row Reflection:** `row_count=0` triggers literal extraction → comparison against `low_cardinality_values` → case-mismatch correction hint injected into retry
+- **Backtrack Node:** on any error, adds strategic hint and re-routes to `analysis_generator` (max 3 retries)
+- **Verifier Agent:** quality gate between insight and recommendation — rejects insights not supported by the actual data
 
 ---
 
 ### CSV Pipeline (7 nodes)
 
-Simpler than SQL — no HITL needed since CSVs are user-uploaded files with no sensitive database credentials.
-
 ```
-START
-  │
-  ▼
-[data_discovery]   → Profile DataFrame: dtypes, nulls, uniques, sample values
-  │
-  ▼
-needs_cleaning (data_quality_score < 0.9?)
-  ├── YES → [data_cleaning]  → Handle nulls, type coercion, outlier flagging
-  │              └──► [analysis]
-  └── NO  →              [analysis]  → Pandas query + statistical analysis
-                              ▼
-                        [visualization]   → Plotly chart JSON
-                              ▼
-                          [insight]       → Executive summary
-                              ▼
-                       [recommendation]   → Next steps
-                              ▼
-                      [output_assembler]  → Final JSON
-                              ▼
-                             END
+START → [data_discovery] → needs_cleaning?
+            ├── YES (quality_score < 0.9) → [data_cleaning] → [analysis]
+            └── NO                        →                   [analysis]
+                                                                  ▼
+                                                          [visualization]
+                                                                  ▼
+                                                            [insight]
+                                                                  ▼
+                                                         [recommendation]
+                                                                  ▼
+                                                       [output_assembler] → END
 ```
 
-**Data quality routing:** the discovery agent computes a quality score based on null ratio, type consistency, and outlier density. Scores below 0.9 trigger automatic cleaning before analysis proceeds.
+Data quality scoring: null ratio + type consistency + outlier density → automatic cleaning if score < 0.9.
 
 ---
 
@@ -365,60 +363,47 @@ START → [intake] → check_intake → [guardrail] → END
                         └── clarification_needed → END
 ```
 
-Runs before every analysis job regardless of data source type. The only way to bypass governance is the `auto_analysis` system user (background jobs triggered on data source upload).
+Runs before every analysis job. The only bypass is the `auto_analysis` system user (background jobs on upload).
 
 ---
 
 ## 🔒 Security Architecture
 
-### Authentication — JWT with Rotation
+### Authentication — JWT with Refresh Rotation
 
 ```
-Register / Login
-    │  POST /api/v1/auth/login
-    │  Returns: access_token (30min) + refresh_token (7 days)
-    ▼
-Protected Request
-    │  Authorization: Bearer {access_token}
-    ▼
-Access Token Expired?
-    │  POST /api/v1/auth/refresh {refresh_token}
-    │  OLD refresh token → REVOKED (JTI deleted from Redis)
-    │  NEW refresh token issued
-    ▼
-Logout
-    │  POST /api/v1/auth/logout {refresh_token}
-    │  JTI added to Redis blacklist — token is dead even before expiry
+Login → access_token (30min) + refresh_token (7 days)
+     → Expired access token? POST /auth/refresh
+     → Old refresh token REVOKED, new pair issued
+     → Logout? JTI added to Redis blacklist (dead before expiry)
 ```
 
-### SQL Injection Prevention (3 Layers)
+### SQL Injection Prevention — 3 Layers
 
 ```
-Layer 1 — Regex guard (sql_guard.py)
+Layer 1 — SELECT-only allowlist
+    Query must start with SELECT or WITH (CTEs allowed)
+
+Layer 2 — Regex blocklist
     Pattern: \b(DROP|DELETE|INSERT|UPDATE|ALTER|TRUNCATE|...)\b
     Applied to ALL SQL before any database connection
-    Raises ValueError on any match
 
-Layer 2 — SELECT-only enforcement
-    Query must start with SELECT or WITH (CTEs allowed)
-    Applied before Layer 1 keyword scan
-
-Layer 3 — LLM Guardrail Agent
-    Policy-aware: admin can add rules like "never query salary columns"
-    Checks semantic intent, not just syntax
+Layer 3 — LLM Semantic Guardrail
+    Policy-aware semantic check (catches "comp" when policy says "never expose salary")
+    Admin configures in plain English via /policies endpoint
 ```
 
-### AES-256 Credential Encryption
+### AES-256-GCM Credential Encryption
 
-SQL connection strings (host, port, username, password, database) are serialized to JSON and encrypted with AES-256-GCM before storage. The encryption key is never stored in the database — it lives exclusively in the `AES_KEY` environment variable. If the env var is lost, credentials are permanently unrecoverable.
+SQL connection strings encrypted before storage. Key lives exclusively in `AES_KEY` env var — if the var is lost, credentials are permanently unrecoverable by design.
 
 ### Rate Limiting
 
 | Endpoint | Limit |
 |---|---|
-| `POST /api/v1/auth/register` | 3 requests / minute |
-| `POST /api/v1/auth/login` | 5 requests / minute |
-| All other endpoints | 200 requests / minute |
+| `POST /auth/register` | 3 req/min |
+| `POST /auth/login` | 5 req/min |
+| All other endpoints | 200 req/min |
 
 ### Security Headers (every response)
 
@@ -439,7 +424,7 @@ Cache-Control: no-store  (API routes only)
 tenants
 ├── id UUID PK
 ├── name TEXT
-├── plan VARCHAR(50)   "internal" | "pro" | "enterprise"
+├── plan VARCHAR(50)        "internal" | "pro" | "enterprise"
 └── created_at TIMESTAMPTZ
 
 users
@@ -447,21 +432,21 @@ users
 ├── tenant_id UUID FK → tenants
 ├── email TEXT UNIQUE
 ├── password_hash TEXT
-├── role VARCHAR(10)   "admin" | "viewer"
+├── role VARCHAR(10)        "admin" | "viewer"
 ├── created_at TIMESTAMPTZ
 └── last_login TIMESTAMPTZ
 
 data_sources
 ├── id UUID PK
 ├── tenant_id UUID FK → tenants
-├── type VARCHAR(10)         "csv" | "sql" | "document"
+├── type VARCHAR(10)               "csv" | "sql" | "document"
 ├── name TEXT
-├── file_path TEXT           CSV: /tmp/tenants/{tenant_id}/file.csv
-├── config_encrypted TEXT    SQL: AES-256 encrypted connection JSON
-├── schema_json JSON         columns, types, row count, sample values
-├── auto_analysis_status VARCHAR(10)  "pending"|"running"|"done"|"failed"
-├── auto_analysis_json JSON  5 pre-generated analyses (on upload)
-├── domain_type VARCHAR(30)  "sales"|"hr"|"finance"|"inventory"|"customer"
+├── file_path TEXT                 /tmp/tenants/{tenant_id}/file.csv
+├── config_encrypted TEXT          AES-256-GCM encrypted connection JSON
+├── schema_json JSON               columns, types, row count, sample values
+├── auto_analysis_status VARCHAR   "pending"|"running"|"done"|"failed"
+├── auto_analysis_json JSON        5 pre-generated analyses (computed on upload)
+├── domain_type VARCHAR(30)        "sales"|"hr"|"finance"|"inventory"|"customer"
 └── created_at TIMESTAMPTZ
 
 analysis_jobs
@@ -470,26 +455,26 @@ analysis_jobs
 ├── user_id UUID FK → users
 ├── source_id UUID FK → data_sources
 ├── question TEXT
-├── intent VARCHAR(50)       "trend"|"comparison"|"ranking"|"correlation"|"anomaly"
-├── status VARCHAR(20)       "pending"|"running"|"done"|"error"|"awaiting_approval"
-├── generated_sql TEXT       SQL query (shown to user before HITL approval)
-├── thinking_steps JSON      LangGraph node outputs for UI reasoning display
-├── complexity_index INTEGER  1-5 scale from intake agent
-├── total_pills INTEGER       number of analysis sub-questions
+├── intent VARCHAR(50)             "trend"|"comparison"|"ranking"|"correlation"|"anomaly"
+├── status VARCHAR(20)             "pending"|"running"|"done"|"error"|"awaiting_approval"
+├── generated_sql TEXT             SQL shown to admin for HITL review
+├── thinking_steps JSON            LangGraph node outputs (powers UI "Reasoning" panel)
+├── complexity_index INTEGER        1–5 scale (from intake agent)
+├── total_pills INTEGER             number of analysis sub-questions
 ├── retry_count INTEGER
-├── kb_id UUID FK → knowledge_bases  (optional PDF fusion)
+├── kb_id UUID FK → knowledge_bases  (optional — enables PDF hybrid fusion)
 ├── started_at TIMESTAMPTZ
 ├── completed_at TIMESTAMPTZ
 └── error_message TEXT
 
 analysis_results
 ├── id UUID PK
-├── job_id UUID FK → analysis_jobs (unique)
-├── charts JSON         array of Plotly chart specs
-├── insight_report TEXT executive summary
-├── recommendations JSON array of action items
-├── data_snapshot JSON  first 100 rows of query result
-└── embedding JSON      result embedding for similarity search
+├── job_id UUID FK → analysis_jobs (1:1)
+├── charts JSON                    array of Plotly chart specs
+├── insight_report TEXT            executive summary
+├── recommendations JSON           array of action items
+├── data_snapshot JSON             first 100 rows of query result
+└── embedding JSON                 result embedding for similarity search
 
 knowledge_bases
 ├── id UUID PK
@@ -502,7 +487,7 @@ policies
 ├── id UUID PK
 ├── tenant_id UUID FK → tenants
 ├── name TEXT
-├── rule TEXT            natural language policy rule
+├── rule TEXT                      natural language guardrail rule
 ├── is_active BOOLEAN
 └── created_at TIMESTAMPTZ
 ```
@@ -511,7 +496,7 @@ policies
 
 ## 🚀 Deployment
 
-### Docker Compose (Local / Staging)
+### Docker Compose — Local / Staging
 
 ```bash
 # 1. Clone and configure
@@ -520,7 +505,7 @@ cd NTI-grad-project
 cp .env.example .env
 # Edit .env — minimum required: GROQ_API_KEY, SECRET_KEY, AES_KEY
 
-# 2. Launch all 9 services
+# 2. Launch all services
 docker compose up --build -d
 
 # 3. Verify
@@ -532,21 +517,22 @@ curl http://localhost:8002/health
 
 | Container | Port | Role |
 |---|---|---|
-| `analyst-api` | 8002 | API Gateway |
+| `analyst-api` | 8002 | API Gateway + SPA |
 | `analyst-governance` | — | Governance worker |
-| `analyst-worker-sql` | — | SQL analysis |
-| `analyst-worker-csv` | — | CSV analysis |
+| `analyst-worker-sql` | — | SQL analysis (11-node) |
+| `analyst-worker-csv` | — | CSV analysis (7-node) |
 | `analyst-worker-json` | — | JSON analysis |
-| `analyst-worker-pdf` | — | PDF RAG |
+| `analyst-worker-pdf` | — | PDF RAG (ColPali) |
 | `analyst-exporter` | — | Export service |
 | `analyst-postgres` | 5433 | Metadata database |
-| `analyst-redis` | 6379 | Broker + cache |
+| `analyst-redis` | 6379 | Broker + cache + HITL checkpoints |
 | `analyst-qdrant` | 6333 | Vector database |
+| `prometheus` | 9090 | Metrics collection |
+| `grafana` | 3000 | Monitoring dashboards |
 
-### Kubernetes (Production)
+### Kubernetes — Production
 
 ```bash
-# Apply all manifests
 kubectl apply -f k8s/namespace.yaml
 kubectl apply -f k8s/secrets.yaml
 kubectl apply -f k8s/configmap.yaml
@@ -555,11 +541,9 @@ kubectl apply -f k8s/postgres-statefulset.yaml
 kubectl apply -f k8s/redis-deployment.yaml
 kubectl apply -f k8s/api-deployment.yaml
 kubectl apply -f k8s/worker-deployment.yaml
-kubectl apply -f k8s/hpa.yaml
+kubectl apply -f k8s/hpa.yaml      # Auto-scales workers by queue depth
 kubectl apply -f k8s/ingress.yaml
 ```
-
-The `hpa.yaml` configures Horizontal Pod Autoscaler — the analysis workers scale automatically based on Celery queue depth.
 
 ---
 
@@ -567,9 +551,9 @@ The `hpa.yaml` configures Horizontal Pod Autoscaler — the analysis workers sca
 
 ### Prerequisites
 
-- Docker + Docker Compose
-- A [Groq API key](https://console.groq.com) (free tier)
-- 4GB RAM minimum (8GB recommended for all workers)
+- Docker + Docker Compose v2
+- [Groq API key](https://console.groq.com) (free tier)
+- 4 GB RAM minimum (8 GB recommended)
 
 ### Quick Start
 
@@ -580,6 +564,7 @@ cp .env.example .env
 ```
 
 Edit `.env`:
+
 ```bash
 GROQ_API_KEY=gsk_...
 SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
@@ -607,10 +592,10 @@ pytest tests/ -v
 
 | Variable | Description |
 |---|---|
-| `GROQ_API_KEY` | Groq API key for LLM calls (llama-3.1-8b-instant default) |
+| `GROQ_API_KEY` | Groq API key — `llama-3.1-8b-instant` default, `llama-3.3-70b-versatile` for production |
 | `SECRET_KEY` | 64-char random hex for JWT signing — **never use default in production** |
 | `AES_KEY` | Base64-encoded 32-byte key for SQL credential encryption |
-| `DATABASE_URL` | PostgreSQL connection string |
+| `DATABASE_URL` | PostgreSQL async connection string |
 | `REDIS_URL` | Redis connection string |
 
 ### Optional Variables
@@ -618,7 +603,7 @@ pytest tests/ -v
 | Variable | Default | Description |
 |---|---|---|
 | `LLM_MODEL` | `groq/llama-3.1-8b-instant` | Override LLM model per service |
-| `ENV` | `development` | Set to `production` to enforce secret validation and hide API docs |
+| `ENV` | `development` | Set to `production` to enforce secret validation + hide API docs |
 | `MAX_UPLOAD_SIZE_MB` | `500` | Maximum CSV/file upload size |
 | `CORS_ORIGINS` | `["http://localhost:3000"]` | JSON array of allowed origins |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | JWT access token lifetime |
@@ -632,26 +617,38 @@ pytest tests/ -v
 |---|---|---|
 | **API Framework** | FastAPI + Uvicorn | 0.115.6 / 0.34.0 |
 | **AI Orchestration** | LangGraph + LangChain | Latest |
-| **LLM Provider** | Groq (Llama-3.1-8B / 3.3-70B) | ≥ latest |
+| **LLM Provider** | Groq (Llama-3.1-8B / 3.3-70B) | Latest |
 | **Task Queue** | Celery + Redis | 5.4.0 / 5.2.1 |
 | **Primary Database** | PostgreSQL + SQLAlchemy async | 16 / 2.0.36 |
 | **Vector Database** | Qdrant (multi-vector ColPali) | Latest |
 | **Authentication** | JWT (python-jose) + bcrypt | 3.3.0 / 4.2.1 |
 | **Data Processing** | Pandas + NumPy | 2.2.3 / 1.26.4 |
-| **Visualization** | Plotly.js (frontend) | CDN |
-| **Frontend** | Vanilla JS ES9+ + CSS Glassmorphism | — |
+| **Visualization** | Plotly.js (frontend) + Plotly (backend) | CDN |
+| **Frontend** | React + TypeScript + Vite (+ legacy Vanilla JS SPA) | Latest |
 | **Migrations** | Alembic | 1.14.1 |
-| **Containerisation** | Docker Compose + Kubernetes | — |
+| **Containerisation** | Docker Compose + Kubernetes (HPA) | — |
+| **Observability** | Prometheus + Grafana | Latest |
 | **Logging** | structlog | Latest |
 | **Rate Limiting** | slowapi | Latest |
 | **Testing** | pytest + httpx | Latest |
 
 ---
 
+## 🎬 Demo
+
+> **Business Demo Video** available — produced with Pippit AI.
+> See [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) for the full script and voiceover used.
+
+---
+
 <div align="center">
 
-**NTI Final Capstone Project — National Telecommunication Institute**
+**NTI Final Capstone Project — National Telecommunication Institute, Egypt**
 
 *420-hour intensive program in multi-agent systems, RAG pipelines, and LLM orchestration*
+
+Built by a team of AI engineers committed to production-grade, enterprise-ready systems.
+
+⭐ If this project helped you, please star the repository.
 
 </div>
