@@ -32,11 +32,17 @@ class Settings(BaseSettings):
     # ── Redis ─────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # ── JWT ───────────────────────────────────────────────────
+    # ── JWT (Local) ───────────────────────────────────────────
     SECRET_KEY: str = _DEFAULT_SECRET_KEY
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # ── Auth Strategy ─────────────────────────────────────────
+    AUTH_STRATEGY: str = "local"  # "local" or "auth0"
+    AUTH0_DOMAIN: str = ""
+    AUTH0_AUDIENCE: str = ""
+    AUTH0_CLIENT_ID: str = ""
 
     # ── LLM APIs ──────────────────────────────────────────────
     OPENROUTER_API_KEY: str = ""

@@ -29,6 +29,7 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("team_groups.id"), nullable=True, index=True
     )
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    auth0_sub: Mapped[Optional[str]] = mapped_column(Text, unique=True, nullable=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(
         String(10), nullable=False

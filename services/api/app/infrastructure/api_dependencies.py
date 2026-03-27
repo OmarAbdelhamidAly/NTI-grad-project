@@ -11,10 +11,13 @@ from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure.config import settings
 from app.infrastructure.database.postgres import get_db, set_tenant_context
 from app.infrastructure.security import decode_token
+from app.infrastructure.auth0 import auth0_validator
 from app.models.user import User
 from app.models.policy import ResourcePolicy
+from app.models.tenant import Tenant
 
 bearer_scheme = HTTPBearer()
 
@@ -30,28 +33,98 @@ async def get_current_user(
     no longer exists.
     """
     token = credentials.credentials
-    try:
-        payload = decode_token(token)
-        user_id: str | None = payload.get("sub")
-        token_type: str | None = payload.get("type")
-        if user_id is None or token_type != "access":
+    
+    if settings.AUTH_STRATEGY == "auth0":
+        # In "auth0" mode we primarily validate Auth0 RS256 tokens.
+        # However, this repo also supports local HS256 tokens issued by
+        # `/api/v1/auth/login` and `/api/v1/auth/register`.
+        # If the token isn't an Auth0 token, we fall back to local validation.
+        try:
+            payload = auth0_validator.validate_token(token)
+
+            # Auth0 'sub' is the unique ID, 'email' is typically in the token if requested
+            sub = payload.get("sub")
+            email = payload.get("email") or f"{sub}@auth0.com"
+
+            # `selectinload` is imported in the local strategy block below, so
+            # import it here too.
+            from sqlalchemy.orm import selectinload
+
+            result = await db.execute(
+                select(User)
+                .options(selectinload(User.group))
+                .where((User.auth0_sub == sub) | (User.email == email))
+            )
+            user = result.scalar_one_or_none()
+
+            if user is None:
+                # Auto-provision user and a fresh tenant
+                new_tenant = Tenant(id=_uuid.uuid4(), name=f"Tenant for {email}")
+                db.add(new_tenant)
+                await db.flush()
+
+                user = User(
+                    id=_uuid.uuid4(),
+                    tenant_id=new_tenant.id,
+                    email=email,
+                    auth0_sub=sub,
+                    role="admin",
+                    password_hash="AUTH0_MANAGED",
+                )
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+            elif user.auth0_sub is None:
+                # Sync sub for legacy user found by email
+                user.auth0_sub = sub
+                await db.commit()
+        except HTTPException as auth0_exc:
+            # Fall back to local strategy (HS256) when Auth0 validation fails.
+            try:
+                payload = decode_token(token)
+                user_id: str | None = payload.get("sub")
+                token_type: str | None = payload.get("type")
+                if user_id is None or token_type != "access":
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid token",
+                    )
+            except JWTError:
+                raise auth0_exc
+
+            from sqlalchemy.orm import selectinload
+
+            result = await db.execute(
+                select(User)
+                .options(selectinload(User.group))
+                .where(User.id == _uuid.UUID(user_id))
+            )
+            user = result.scalar_one_or_none()
+    else:
+        # Standard Local Strategy
+        try:
+            payload = decode_token(token)
+            user_id: str | None = payload.get("sub")
+            token_type: str | None = payload.get("type")
+            if user_id is None or token_type != "access":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token",
+                )
+        except JWTError:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token",
+                detail="Could not validate credentials",
             )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-        )
 
-    from sqlalchemy.orm import selectinload
-    result = await db.execute(
-        select(User)
-        .options(selectinload(User.group))
-        .where(User.id == _uuid.UUID(user_id))
-    )
-    user = result.scalar_one_or_none()
+        from sqlalchemy.orm import selectinload
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.group))
+            .where(User.id == _uuid.UUID(user_id))
+        )
+        user = result.scalar_one_or_none()
+
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -24,8 +24,8 @@ _reranker = None
 def _get_embedding_model():
     global _embed_model
     if _embed_model is None:
-        from fastembed import TextEmbeddingModel
-        _embed_model = TextEmbeddingModel(model_name="BAAI/bge-small-en-v1.5")
+        from fastembed import TextEmbedding
+        _embed_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _embed_model
 
 

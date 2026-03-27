@@ -12,7 +12,7 @@ interface ChatInterfaceProps {
 }
 
 export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
-  const [depthIndex, setDepthIndex] = useState(3);
+  const depthIndex = 3; // Default to Deep indexing as requested
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [viewMode, setViewMode] = useState<'chat' | 'profile'>('chat');
@@ -96,10 +96,29 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
         validHistory
       );
       await startPolling(job_id, systemId, onMessageUpdate, () => {});
-    } catch (error) {
+    } catch (error: any) {
       console.error("Submit error", error);
+      
+      // Extract error message from backend response
+      let errorMessage = "Sorry, there was an error submitting your request.";
+      
+      if (error.response) {
+        // HTTP 423: PDF still being indexed
+        if (error.response.status === 423) {
+          errorMessage = error.response.data?.detail || "⏳ PDF is still being indexed. Please wait for indexing to complete before asking questions.";
+        } 
+        // HTTP 422: PDF indexing failed
+        else if (error.response.status === 422) {
+          errorMessage = error.response.data?.detail || "❌ PDF indexing failed. Please re-upload the document.";
+        }
+        // Other HTTP errors with detail message
+        else if (error.response.data?.detail) {
+          errorMessage = error.response.data.detail;
+        }
+      }
+      
       onMessageUpdate(systemId, { 
-        content: "Sorry, there was an error submitting your request.", 
+        content: errorMessage, 
         isStreaming: false 
       });
       setIsProcessing(false);
@@ -153,8 +172,6 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
         handleSubmit={handleSubmit}
         isProcessing={isProcessing}
         disabled={activeSourceIds.length === 0 || viewMode === 'profile'}
-        depthIndex={depthIndex}
-        setDepthIndex={setDepthIndex}
       />
     </div>
   );
@@ -258,11 +275,9 @@ interface ChatInputProps {
   handleSubmit: (e: React.FormEvent) => void;
   isProcessing: boolean;
   disabled: boolean;
-  depthIndex: number;
-  setDepthIndex: (val: number) => void;
 }
 
-function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled, depthIndex, setDepthIndex }: ChatInputProps) {
+function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled }: ChatInputProps) {
   const [isRecording, setIsRecording] = useState(false);
 
   const handleVoiceSearch = async () => {
@@ -287,33 +302,13 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled, dept
     }
   };
 
-  const depths = [
-    { value: 1, label: 'Fast', color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
-    { value: 3, label: 'Deep', color: 'text-indigo-400', bg: 'bg-indigo-500/10' },
-    { value: 5, label: 'Full Scan', color: 'text-red-400', bg: 'bg-red-500/10' }
-  ];
+  // Depth configuration removed as requested
 
   return (
     <div className="absolute bottom-0 w-full bg-gradient-to-t from-[#0a0d17] via-[#0a0d17]/95 to-transparent pt-20 pb-8 px-6 pointer-events-none">
       <div className="max-w-4xl mx-auto relative group pointer-events-auto">
         
-        {/* Heritage Feature: Depth Index Pills */}
-        {!disabled && (
-          <div className="flex items-center justify-center gap-2 mb-4 animate-in fade-in slide-in-from-bottom-2">
-            <div className="bg-[#171033]/60 backdrop-blur-xl p-1 border border-slate-700/50 rounded-2xl flex gap-1 shadow-2xl">
-              {depths.map((d) => (
-                <button
-                  key={d.value}
-                  type="button"
-                  onClick={() => setDepthIndex(d.value)}
-                  className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-[0.15em] transition-all ${depthIndex === d.value ? `${d.bg} ${d.color} shadow-lg shadow-indigo-500/10 scale-105` : 'text-slate-500 hover:text-slate-300'}`}
-                >
-                  {d.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        {/* Depth Index Switcher Removed as requested */}
 
         <div className="absolute -inset-1 bg-gradient-to-r from-[var(--primary)] to-[var(--primary-alt)] rounded-[32px] opacity-10 group-hover:opacity-20 blur-xl transition duration-500"></div>
         <form onSubmit={handleSubmit} className="relative flex items-center bg-[#0a0d17]/80 backdrop-blur-3xl border border-slate-800/50 rounded-[28px] p-2.5 shadow-2xl transition-all group-focus-within:border-[var(--primary)]/40">
@@ -349,11 +344,7 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled, dept
             </button>
           </div>
         </form>
-        <div className="flex items-center justify-center gap-6 mt-4 opacity-40">
            <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">Groq Llama-3.3-70B</p>
-           <div className="w-1 h-1 rounded-full bg-slate-800"></div>
-           <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">Depth Index: {depths.find(d => d.value === depthIndex)?.label.toUpperCase()}</p>
-        </div>
       </div>
     </div>
   );

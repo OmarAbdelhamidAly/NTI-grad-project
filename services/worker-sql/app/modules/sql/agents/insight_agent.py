@@ -21,24 +21,16 @@ from app.infrastructure.config import settings
 
 INSIGHT_PROMPT = """You are a senior data analyst writing insights for business stakeholders.
 
-Based on the analysis results and supplemental knowledge base context, write:
+### FORMATTING RULES (STRICT)
+1. You MUST respond with ONLY a valid JSON object.
+2. The `insight_report` and `executive_summary` fields MUST contain RAW text without markdown code blocks (no ```) inside the string values.
+3. DO NOT wrap the text in curly braces {{}} or extra quotes.
+4. If there is no data, explain why clearly in the report.
 
-1. **insight_report**: A detailed analysis in plain English (3-5 paragraphs).
-   - Always quantify findings: "23% drop" not just "dropped".
-   - Reference specific data points.
-   - **Hybrid Reasoning**: If Knowledge Base context is provided, cross-reference the numbers with the policies/guidelines found in the context.
-
-2. **executive_summary**: Max 3 sentences. Plain English. No jargon.
-   - Lead with the headline finding.
-   - Include the key number.
-   - State the implication.
-
-Respond in STRICT JSON format. 
-NO PREAMBLE. NO EXPLANATION. JUST THE JSON OBJECT.
-
+### REQUIRED JSON STRUCTURE
 {{
-  "insight_report": "...",
-  "executive_summary": "..."
+  "insight_report": "Direct analysis text here. Use bullet points or paragraphs as needed.",
+  "executive_summary": "One or two punchy sentences for a busy executive."
 }}
 
 Question: {question}
@@ -74,8 +66,20 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
         else:
             complexity_instruction = f"TONE: Investigative & Advanced. Dig into the 'why'. Look for second-order effects or trends that are not immediately obvious at first glance."
 
+    def _sanitize_question(q: str) -> str:
+        """Extract text from JSON questions if they have history."""
+        try:
+            parsed = json.loads(q)
+            if isinstance(parsed, dict) and "text" in parsed:
+                return parsed["text"]
+        except:
+            pass
+        return q
+
+    clean_question = _sanitize_question(state.get("question") or "")
+
     prompt = INSIGHT_PROMPT.format(
-        question=state.get("question") or "",
+        question=clean_question,
         intent=state.get("intent") or "comparison",
         kb_context=analysis.get("kb_context") or "None provided.",
         data=json.dumps(analysis.get("data", [])[:20], indent=2, default=str),
@@ -103,37 +107,44 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
         }
 
 
-def _parse_json(content: Any) -> Dict[str, Any]:
-    """Ultra-resilient JSON parser for Llama-3/Groq responses."""
-    if not isinstance(content, str) or not content.strip():
+def _parse_json(content: str) -> Dict[str, str]:
+    """Extract JSON object from LLM response with fallback extraction."""
+    import re
+    
+    if not content or not content.strip():
         return {}
-
+    
     content = content.strip()
     
-    # 1. Be aggressive: look for the first { and last } regardless of blocks
-    start_idx = content.find('{')
-    end_idx = content.rfind('}')
+    # Try to find JSON block first
+    json_match = re.search(r'\{[\s\S]*\}', content)
+    if json_match:
+        try:
+            # Clean common LLM artifacts like escaped newlines or weird characters
+            raw_json = json_match.group().strip()
+            parsed = json.loads(raw_json)
+            # Ensure the values themselves don't have residual JSON-like markers
+            for key in ["insight_report", "executive_summary"]:
+                if key in parsed and isinstance(parsed[key], str):
+                    val = parsed[key].strip()
+                    # Remove accidental markdown code block wrappers inside the string
+                    val = re.sub(r'^```[a-z]*\n|```$', '', val, flags=re.MULTILINE)
+                    parsed[key] = val
+            return parsed
+        except json.JSONDecodeError:
+            pass
     
-    if start_idx == -1 or end_idx == -1:
-        return {}
-
-    json_str = content[start_idx : end_idx + 1]
-
-    # 2. Try standard load
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-
-    # 3. Clean common issues and try again
-    try:
-        # Handle trailing commas before closing brackets
-        cleaned = re.sub(r',\s*([\]}])', r'\1', json_str)
-        # Handle control characters
-        cleaned = re.sub(r'[\x00-\x1F\x7F]', '', cleaned)
-        return json.loads(cleaned)
-    except Exception:
-        pass
-
-    return {}
-    return {}
+    # Fallback: Extract fields using regex
+    result = {}
+    
+    # Look for insight_report field
+    insight_match = re.search(r'["\']?insight_report["\']?\s*:\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if insight_match:
+        result["insight_report"] = insight_match.group(1)
+    
+    # Look for executive_summary field  
+    summary_match = re.search(r'["\']?executive_summary["\']?\s*:\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if summary_match:
+        result["executive_summary"] = summary_match.group(1)
+    
+    return result if result else {}

@@ -67,6 +67,39 @@ async def submit_query(
             detail="Data source not found",
         )
 
+    # Check if PDF is still being indexed
+    if source.type == "pdf" and source.indexing_status in ("pending", "running"):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail=f"PDF document is still being indexed (status: {source.indexing_status}). Please wait for indexing to complete before asking questions.",
+        )
+    if source.type == "pdf" and source.indexing_status == "failed":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="PDF indexing failed. Please re-upload the document or contact support.",
+        )
+
+    # Also check multi-sources if any
+    if body.multi_source_ids:
+        multi_result = await db.execute(
+            select(DataSource.id, DataSource.type, DataSource.indexing_status)
+            .where(
+                DataSource.id.in_(body.multi_source_ids),
+                DataSource.tenant_id == current_user.tenant_id,
+            )
+        )
+        for row in multi_result:
+            if row.type == "pdf" and row.indexing_status in ("pending", "running"):
+                raise HTTPException(
+                    status_code=status.HTTP_423_LOCKED,
+                    detail=f"PDF document {row.id} is still being indexed. Please wait for indexing to complete before asking questions.",
+                )
+            if row.type == "pdf" and row.indexing_status == "failed":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"PDF document {row.id} indexing failed. Please re-upload or contact support.",
+                )
+
     import json
     actual_question = body.question
     if body.chat_history:
@@ -86,7 +119,7 @@ async def submit_query(
         total_pills=body.total_pills,
     )
     db.add(job)
-    await db.flush()
+    await db.commit()
     await db.refresh(job)
 
     # Dispatch to Celery Governance Layer
@@ -111,7 +144,9 @@ async def submit_query(
         question=body.question,
     )
 
-    return AnalysisJobResponse.model_validate(job)
+    result_json = AnalysisJobResponse.model_validate(job)
+    result_json.source_type = source.type
+    return result_json
 
 
 @router.get("/history", response_model=AnalysisHistoryResponse)
@@ -190,6 +225,10 @@ async def get_job(
             detail="Analysis job not found",
         )
 
+    # Fetch source type for correct UI visualization
+    source_res = await db.execute(select(DataSource.type).where(DataSource.id == job.source_id))
+    source_type = source_res.scalar_one_or_none()
+
     import json
     rj = AnalysisJobResponse.model_validate(job)
     try:
@@ -198,6 +237,8 @@ async def get_job(
             rj.question = parsed["text"]
     except:
         pass
+        
+    rj.source_type = source_type
     return rj
 
 

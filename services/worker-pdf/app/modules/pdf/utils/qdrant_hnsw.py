@@ -83,14 +83,14 @@ class QdrantHNSWManager:
             ]
             query_filter = models.Filter(must=conditions)
 
-        return self.client.search(
+        return self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             query_filter=query_filter,
             score_threshold=score_threshold,
             with_payload=True,
-        )
+        ).points
 
     def delete_by_source(self, source_id: str):
         """Delete all chunks belonging to a source (for re-indexing)."""

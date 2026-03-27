@@ -5,6 +5,7 @@ directly. This makes it easy to swap providers in one place.
 """
 
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.language_models.chat_models import BaseChatModel
 from app.infrastructure.config import settings
 
@@ -15,13 +16,12 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
     # If no model provided, use environment default or hardcoded safe bet
     primary_model_name = model or settings.LLM_MODEL
     
-    def _make_gemini(m: str = "gemini-1.5-flash"):
-        return ChatOpenAI(
+    def _make_gemini(m: str = "gemini-flash-latest"):
+        return ChatGoogleGenerativeAI(
             model=m,
-            api_key=settings.GEMINI_API_KEY,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            google_api_key=settings.GEMINI_API_KEY,
             temperature=temperature,
-            max_tokens=4096,
+            max_output_tokens=4096,
             max_retries=1,
         )
 
@@ -46,7 +46,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
     # 2. Build Fallbacks
     fallbacks = []
     if settings.GEMINI_API_KEY and "gemini" not in primary_model_name.lower():
-        fallbacks.append(_make_gemini("gemini-1.5-flash"))
+        fallbacks.append(_make_gemini("gemini-flash-latest"))
     
     if fallbacks:
         return llm.with_fallbacks(fallbacks)

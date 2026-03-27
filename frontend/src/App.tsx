@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useAuth0 } from '@auth0/auth0-react';
 import './index.css';
 
 // Layout Components
@@ -11,6 +12,7 @@ import GovernanceView from './components/Governance/GovernanceView';
 import TeamManagementView from './components/Governance/TeamManagementView';
 import KnowledgeHubView from './components/Governance/KnowledgeHubView';
 import SystemView from './components/System/SystemView';
+import NeuralFeed from './components/Dashboard/NeuralFeed';
 import { AuthAPI } from './services/api';
 
 // Team Management integrated via external component
@@ -22,33 +24,63 @@ function App() {
   const [token, setToken] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
 
+  const { 
+    isAuthenticated, 
+    user: auth0User, 
+    getAccessTokenSilently, 
+    logout: auth0Logout, 
+    isLoading: auth0Loading 
+  } = useAuth0();
+
   useEffect(() => {
-    const savedToken = localStorage.getItem('auth_token');
-    const savedRefreshToken = localStorage.getItem('auth_refresh_token');
-    const savedUser = localStorage.getItem('auth_user');
-    
-    if (savedToken && savedRefreshToken && savedUser) {
-      try {
-        const parsedUser = JSON.parse(savedUser);
-        if (parsedUser && typeof parsedUser === 'object') {
-          setToken(savedToken);
-          setUser(parsedUser);
-          
-          // Apply Branding
-          if (parsedUser.branding_config) {
-            const config = parsedUser.branding_config;
-            if (config.primary_color) document.documentElement.style.setProperty('--primary', config.primary_color);
-            if (config.secondary_color) document.documentElement.style.setProperty('--secondary', config.secondary_color);
-          }
-        } else {
-          clearAuth();
+    const initAuth = async () => {
+      if (isAuthenticated && auth0User) {
+        try {
+          const token = await getAccessTokenSilently();
+          // Map Auth0 user to our internal format
+          const newUser = {
+            id: auth0User.sub,
+            email: auth0User.email,
+            role: 'admin', // Default role for now, backend will auto-provision correctly
+            tenant_id: 'auto-provisioned'
+          };
+          handleLogin(token, 'auth0-refresh-token', newUser);
+        } catch (e) {
+          console.error("Error getting transition token", e);
         }
-      } catch (e) {
-        clearAuth();
+      } else {
+        const savedToken = localStorage.getItem('auth_token');
+        const savedRefreshToken = localStorage.getItem('auth_refresh_token');
+        const savedUser = localStorage.getItem('auth_user');
+
+        if (savedToken && savedRefreshToken && savedUser) {
+          try {
+            const parsedUser = JSON.parse(savedUser);
+            if (parsedUser && typeof parsedUser === 'object') {
+              setToken(savedToken);
+              setUser(parsedUser);
+
+              // Apply Branding
+              if (parsedUser.branding_config) {
+                const config = parsedUser.branding_config;
+                if (config.primary_color) document.documentElement.style.setProperty('--primary', config.primary_color);
+                if (config.secondary_color) document.documentElement.style.setProperty('--secondary', config.secondary_color);
+              }
+            } else {
+              clearAuth();
+            }
+          } catch (e) {
+            clearAuth();
+          }
+        }
       }
+      setIsInitializing(false);
+    };
+
+    if (!auth0Loading) {
+      initAuth();
     }
-    setIsInitializing(false);
-  }, []);
+  }, [isAuthenticated, auth0User, auth0Loading]);
 
   const clearAuth = () => {
     localStorage.removeItem('auth_token');
@@ -100,7 +132,11 @@ function App() {
 
   const handleLogout = async () => {
     try {
-      await AuthAPI.logout();
+      if (isAuthenticated) {
+        auth0Logout({ logoutParams: { returnTo: window.location.origin } });
+      } else {
+        await AuthAPI.logout();
+      }
     } catch (e) {
       console.error("Logout failed", e);
     } finally {
@@ -113,24 +149,24 @@ function App() {
       case 'dashboard':
         return <ChatInterface activeSourceIds={activeSourceIds} />;
       case 'csv':
-        return <PortalDashboard type="csv" onSelectSource={(id) => { 
-          if (id) setActiveSourceIds([id]); 
-          setCurrentView('dashboard'); 
+        return <PortalDashboard type="csv" onSelectSource={(id) => {
+          if (id) setActiveSourceIds([id]);
+          setCurrentView('dashboard');
         }} />;
       case 'sql':
-        return <PortalDashboard type="sql" onSelectSource={(id) => { 
-          if (id) setActiveSourceIds([id]); 
-          setCurrentView('dashboard'); 
+        return <PortalDashboard type="sql" onSelectSource={(id) => {
+          if (id) setActiveSourceIds([id]);
+          setCurrentView('dashboard');
         }} />;
       case 'pdf':
-        return <PortalDashboard type="pdf" onSelectSource={(id) => { 
-          if (id) setActiveSourceIds([id]); 
-          setCurrentView('dashboard'); 
+        return <PortalDashboard type="pdf" onSelectSource={(id) => {
+          if (id) setActiveSourceIds([id]);
+          setCurrentView('dashboard');
         }} />;
       case 'json':
-        return <PortalDashboard type="json" onSelectSource={(id) => { 
-          if (id) setActiveSourceIds([id]); 
-          setCurrentView('dashboard'); 
+        return <PortalDashboard type="json" onSelectSource={(id) => {
+          if (id) setActiveSourceIds([id]);
+          setCurrentView('dashboard');
         }} />;
       case 'governance':
         return <GovernanceView />;
@@ -140,6 +176,8 @@ function App() {
         return <TeamManagementView />;
       case 'knowledge':
         return <KnowledgeHubView />;
+      case 'neural-feed':
+        return <NeuralFeed />;
       default:
         return <ChatInterface activeSourceIds={activeSourceIds} />;
     }
@@ -165,17 +203,17 @@ function App() {
   return (
     <div className="min-h-screen bg-transparent text-slate-200 flex overflow-hidden relative">
       <NeuralBackground />
-      <Sidebar 
-        activeSourceIds={activeSourceIds} 
+      <Sidebar
+        activeSourceIds={activeSourceIds}
         onToggleSource={(id) => {
           if (!id) {
             setActiveSourceIds([]);
             return;
           }
-          setActiveSourceIds(prev => 
+          setActiveSourceIds(prev =>
             prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
           );
-        }} 
+        }}
         onSelectSource={(id) => {
           if (id) {
             setActiveSourceIds([id]);

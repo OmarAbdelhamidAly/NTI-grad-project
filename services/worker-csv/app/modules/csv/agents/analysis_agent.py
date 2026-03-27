@@ -18,6 +18,7 @@ from app.domain.analysis.entities import AnalysisState
 from app.infrastructure.config import settings
 from app.modules.csv.tools.load_data_source import resolve_data_path
 from app.modules.csv.utils.retrieval import get_kb_context
+from app.modules.csv.utils.golden_pandas import golden_pandas_manager
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ async def _run_csv_analysis(
         intent=intent,
         columns=columns,
         kb_context=kb_context or "No relevant document context found.",
-        golden_examples="No relevant examples found.", # CSV golden logic can be added later
+        golden_examples="\n".join([f"Q: {ex['question']}\nPlan: {json.dumps(ex['plan'])}" for ex in golden_pandas_manager.get_similar_examples(state['question'])]) if golden_pandas_manager.get_similar_examples(state['question']) else "No relevant examples found.",
         complexity_instruction=complexity_instruction,
         chat_history=chat_history,
         error_hint=error_hint,
@@ -159,7 +160,7 @@ async def _run_csv_analysis(
                 "analysis_results": {
                     "plan": {"operation": "meta_bypass", "summary": "Skipped LLM planner for meta-question"},
                     "source_type": "csv",
-                    "dataframe": meta_result["dataframe"].to_dict(orient="records"),
+                    "data": meta_result["dataframe"].to_dict(orient="records"),
                     "columns": list(meta_result["dataframe"].columns),
                     "summary": meta_result["title"]
                 },
@@ -282,7 +283,7 @@ def _dispatch_csv_tool(data_path: str, operation: str, plan: Dict[str, Any]) -> 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _handle_meta_question(question: str, schema: Dict[str, Any], data_path: str) -> Optional[Dict[str, Any]]:
-    \"\"\"Answer questions ABOUT the dataset structure directly — no LLM needed.\"\"\"
+    """Answer questions ABOUT the dataset structure directly — no LLM needed."""
     import pandas as pd
     q = question.lower().strip()
     columns_info = schema.get("columns", [])

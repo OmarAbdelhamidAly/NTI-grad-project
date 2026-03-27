@@ -48,8 +48,9 @@ class Settings(BaseSettings):
 
 
 
-
-
+    # ── Qdrant ────────────────────────────────────────────────
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
 
     # ── AES-256 Encryption ────────────────────────────────────
     AES_KEY: str = _DEFAULT_AES_KEY

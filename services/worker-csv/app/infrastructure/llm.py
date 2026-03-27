@@ -19,7 +19,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
     def _make_gemini(m: str | None = None):
         m_name = m or settings.LLM_MODEL
         if m_name == "gemini":
-            m_name = "gemini-1.5-flash"
+            m_name = "gemini-flash-latest"
         # We use ChatOpenAI because Gemini supports OpenAI protocol, breaking free from old SDK
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(

@@ -12,13 +12,14 @@ from app.infrastructure.config import settings
 
 INTAKE_PROMPT = """You are an intake analyst for a data analysis platform.
 
-Given a user's question, a data source schema, and a dictionary of business metrics, determine:
+Given a user's question, a data source schema, a document category/industry, and a dictionary of business metrics, determine:
 1. **intent**: One of: trend, comparison, ranking, correlation, anomaly
 2. **relevant_columns**: List of column names from the schema that are relevant
 3. **time_range**: If temporal, specify the range (e.g., "last 2 years"), else null
 4. **clarification_needed**: If the question is ambiguous, ask for clarification, else null
 
 Note: Use the "Business Metrics Dictionary" to understand company-specific terms in the question.
+Consider the "Document Category/Industry" to provide contextually relevant analysis.
 
 Respond in JSON format:
 {{
@@ -27,6 +28,8 @@ Respond in JSON format:
   "time_range": null,
   "clarification_needed": null
 }}
+
+Document Category/Industry: {industry}
 
 Business Metrics Dictionary:
 {metrics}
@@ -43,9 +46,11 @@ async def intake_agent(state: AnalysisState) -> Dict[str, Any]:
 
     schema_str = json.dumps(state.get("schema_summary", {}), indent=2)
     metrics_str = json.dumps(state.get("business_metrics", []), indent=2)
+    industry = state.get("industry", "General Business")
     prompt = INTAKE_PROMPT.format(
         metrics=metrics_str, 
         schema=schema_str, 
+        industry=industry,
         question=state["question"]
     )
 

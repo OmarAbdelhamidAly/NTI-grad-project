@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import base64
 import plotly.io as pio
 import structlog
 
@@ -24,7 +25,29 @@ class ExportService:
         exports_dir = get_exports_dir(str(job.tenant_id))
         file_path = str(exports_dir / f"report_{job.id}.pdf")
 
-        # Prepare Recommendations HTML
+        # 1. Prepare Chart Image (Base64) for Embedding
+        chart_img_tag = ""
+        chart_json = result.chart_json
+        if chart_json and isinstance(chart_json, dict):
+            try:
+                # Clean JSON for Plotly (remove engine flag)
+                clean_json = {k: v for k, v in chart_json.items() if k != "chart_engine"}
+                fig = pio.from_json(json.dumps(clean_json))
+                fig.update_layout(
+                    template="plotly_white",
+                    font_family="Inter",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    margin=dict(l=40, r=40, t=60, b=40)
+                )
+                img_bytes = pio.to_image(fig, format="png", width=1200, height=800, scale=1.5)
+                b64_img = base64.b64encode(img_bytes).decode('utf-8')
+                chart_img_tag = f'<div class="card chart-container"><img src="data:image/png;base64,{b64_img}" style="width: 100%; border-radius: 8px;" /></div>'
+            except Exception as chart_err:
+                logger.error("pdf_chart_render_failed", error=str(chart_err))
+                chart_img_tag = f'<div class="card error-box">Visualization rendering failed: {str(chart_err)}</div>'
+
+        # 2. Prepare Recommendations HTML
         recs_html = ""
         recs = result.recommendations_json or []
         for i, rec in enumerate(recs, 1):
@@ -140,6 +163,11 @@ class ExportService:
             </div>
 
             <section>
+                <h2>Data Visualization</h2>
+                {chart_img_tag or "<p class='text-muted'>Visualization not available for this analysis.</p>"}
+            </section>
+
+            <section>
                 <h2>Executive Summary</h2>
                 <div class="card" style="background: linear-gradient(135deg, #ffffff 0%, #f0f7ff 100%);">
                     {result.exec_summary or "Summary not available."}
@@ -182,10 +210,12 @@ class ExportService:
         file_path = str(exports_dir / f"chart_{job.id}.png")
 
         chart_json = result.chart_json
-        if not chart_json:
+        if not chart_json or not isinstance(chart_json, dict):
             return ""
 
-        fig = pio.from_json(json.dumps(chart_json))
+        # Clean JSON for Plotly (remove engine flag)
+        clean_json = {k: v for k, v in chart_json.items() if k != "chart_engine"}
+        fig = pio.from_json(json.dumps(clean_json))
         # Premium styling for the chart image
         fig.update_layout(
             template="plotly_white",
@@ -202,7 +232,7 @@ class ExportService:
         file_path = str(exports_dir / f"data_{job.id}.csv")
 
         chart_json = result.chart_json
-        if chart_json and "data" in chart_json:
+        if chart_json and isinstance(chart_json, dict) and "data" in chart_json:
             data_list = []
             for trace in chart_json["data"]:
                 trace_name = trace.get("name", "Value")

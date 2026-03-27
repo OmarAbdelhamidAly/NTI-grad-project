@@ -16,7 +16,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
     
     primary_model_name = model or settings.LLM_MODEL
     
-    def _make_gemini(m: str = "gemini-1.5-flash"):
+    def _make_gemini(m: str = "gemini-flash-latest"):
         # We use ChatOpenAI because Gemini supports OpenAI protocol, breaking free from old SDK
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
@@ -42,7 +42,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
             },
         )
 
-    def _make_groq(m: str = "llama-3.1-8b-instant"):
+    def _make_groq(m: str = "llama-3.3-70b-versatile"):
         # Use 8B by default to avoid extreme TPM limits of 70B on free tier
         return ChatOpenAI(
             model=m,
@@ -76,7 +76,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
                 m_name = m_name[len(prefix):]
         # Common correction for Flash
         if m_name == "gemini":
-            m_name = "gemini-1.5-flash"
+            m_name = "gemini-flash-latest"
         
         llm = _make_gemini(m_name)
     elif "groq" in primary_model_name.lower() or "llama-3" in primary_model_name.lower():
@@ -92,7 +92,7 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
 
     # If primary isn't Groq, use Groq as the fast fallback
     if settings.GROQ_API_KEY and "groq" not in primary_model_name:
-        fallbacks.append(_make_groq("llama-3.1-8b-instant"))
+        fallbacks.append(_make_groq("llama-3.3-70b-versatile"))
 
     # If primary isn't Gemini, and we have the key, add it as a backup (though usually Gemini is primary)
     if settings.GEMINI_API_KEY and "gemini" not in primary_model_name:

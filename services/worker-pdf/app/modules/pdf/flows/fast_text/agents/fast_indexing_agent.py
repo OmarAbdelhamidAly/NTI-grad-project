@@ -25,9 +25,9 @@ def _get_embedding_model():
     """Lazy-load FastEmbed model (tiny, no GPU needed)."""
     global _embed_model
     if _embed_model is None:
-        from fastembed import TextEmbeddingModel
+        from fastembed import TextEmbedding
         logger.info("loading_fastembed_model", model="BAAI/bge-small-en-v1.5")
-        _embed_model = TextEmbeddingModel(model_name="BAAI/bge-small-en-v1.5")
+        _embed_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
         logger.info("fastembed_model_loaded")
     return _embed_model
 
@@ -107,27 +107,62 @@ async def fast_indexing_agent(source_id: str) -> Dict[str, Any]:
             await db.commit()
             return {"error": f"File not found: {file_path}"}
 
-        # Mark as running
+        # Mark as running with 5% progress
         await db.execute(
             update(DataSource)
             .where(DataSource.id == uuid.UUID(source_id))
-            .values(indexing_status="running")
+            .values(
+                indexing_status="running",
+                schema_json={**(source.schema_json or {}), "progress": 5, "current_step": "Initializing metadata..."}
+            )
         )
         await db.commit()
 
     try:
         # ── Step 1: Text Extraction ──────────────────────────────────────────
+        async with async_session_factory() as db:
+            await db.execute(
+                update(DataSource)
+                .where(DataSource.id == uuid.UUID(source_id))
+                .values(schema_json={**(source.schema_json or {}), "progress": 10, "current_step": "Extracting text from PDF..."})
+            )
+            await db.commit()
+
         pages = _extract_text_from_pdf(file_path)
         if not pages:
             raise ValueError("No text extracted from PDF. File may be image-only — use Deep Vision mode instead.")
 
         # ── Step 2: Chunking ────────────────────────────────────────────────
+        async with async_session_factory() as db:
+            await db.execute(
+                update(DataSource)
+                .where(DataSource.id == uuid.UUID(source_id))
+                .values(schema_json={**(source.schema_json or {}), "progress": 25, "current_step": "Partitioning text into neural chunks..."})
+            )
+            await db.commit()
+
         chunks = _split_into_chunks(pages, chunk_size=300, overlap=50)
 
         # ── Step 3: Embedding ───────────────────────────────────────────────
+        async with async_session_factory() as db:
+            await db.execute(
+                update(DataSource)
+                .where(DataSource.id == uuid.UUID(source_id))
+                .values(schema_json={**(source.schema_json or {}), "progress": 40, "current_step": "Generating dense semantic embeddings..."})
+            )
+            await db.commit()
+
         vectors = _embed_chunks(chunks)
 
         # ── Step 4: Qdrant Upsert ───────────────────────────────────────────
+        async with async_session_factory() as db:
+            await db.execute(
+                update(DataSource)
+                .where(DataSource.id == uuid.UUID(source_id))
+                .values(schema_json={**(source.schema_json or {}), "progress": 70, "current_step": "Syncing vectors with Qdrant Cloud..."})
+            )
+            await db.commit()
+
         collection_name = f"fast_ds_{source_id.replace('-', '')}"
         qdrant = QdrantHNSWManager(collection_name=collection_name)
         qdrant.ensure_collection()
@@ -156,6 +191,16 @@ async def fast_indexing_agent(source_id: str) -> Dict[str, Any]:
         BATCH = 100
         for b in range(0, len(points), BATCH):
             qdrant.upsert_chunks(points[b: b + BATCH])
+            
+            # Sub-progress for large files
+            progress = min(70 + int((b / len(points)) * 25), 95)
+            async with async_session_factory() as db:
+                await db.execute(
+                    update(DataSource)
+                    .where(DataSource.id == uuid.UUID(source_id))
+                    .values(schema_json={**(source.schema_json or {}), "progress": progress, "current_step": f"Uploading vectors... ({b}/{len(points)})"})
+                )
+                await db.commit()
 
         logger.info("fast_indexing_upserted", source_id=source_id, total_points=len(points))
 
@@ -171,6 +216,8 @@ async def fast_indexing_agent(source_id: str) -> Dict[str, Any]:
                         "chunk_count": len(chunks),
                         "indexed": True,
                         "indexing_mode": "fast_text",
+                        "progress": 100,
+                        "current_step": "Indexing complete. Neural sync verified."
                     },
                 )
             )

@@ -14,7 +14,7 @@ from app.models.user import User
 from app.models.team_group import TeamGroup
 from app.schemas.group import GroupResponse, GroupCreateRequest, GroupUpdateRequest, GroupListResponse
 
-router = APIRouter(prefix="/groups", tags=["Groups & Teams"])
+router = APIRouter(prefix="/api/v1/groups", tags=["Groups & Teams"])
 
 
 @router.get("", response_model=List[GroupResponse])

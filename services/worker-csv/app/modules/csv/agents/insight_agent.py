@@ -1,8 +1,7 @@
 """CSV Pipeline — Insight Agent.
 
 Generates written analysis and executive summary from CSV analysis results.
-Source-agnostic logic — identical to the SQL version, both kept
-separate so each pipeline folder is self-contained.
+Learned from the high-performance SQL implementation.
 """
 
 from __future__ import annotations
@@ -20,25 +19,17 @@ from app.infrastructure.config import settings
 
 INSIGHT_PROMPT = """You are a senior data analyst writing insights for business stakeholders.
 
-Based on the analysis results, write:
+### FORMATTING RULES (STRICT)
+1. You MUST respond with ONLY a valid JSON object.
+2. The `insight_report` and `executive_summary` fields MUST contain RAW text without markdown code blocks (no ```) inside the string values.
+3. DO NOT wrap the text in curly braces {{}} or extra quotes.
+4. If there is no data, explain why clearly in the report.
 
-1. **insight_report**: A detailed analysis in plain English (3-5 paragraphs).
-   - Always quantify findings: "23% drop" not just "dropped".
-   - Reference specific data points.
-   - Explain the "why" behind the numbers when possible.
-
-2. **executive_summary**: Max 3 sentences. Plain English. No jargon.
-   - Lead with the headline finding.
-   - Include the key number.
-   - State the implication.
-
-Respond in the following STRICT JSON format:
+### REQUIRED JSON STRUCTURE
 {{
-  "insight_report": "...",
-  "executive_summary": "..."
+  "insight_report": "Direct analysis text here. Use bullet points or paragraphs as needed.",
+  "executive_summary": "One or two punchy sentences for a busy executive."
 }}
-
-STRICT JSON format only. NO PREAMBLE. NO post-explanation.
 
 Question: {question}
 Intent: {intent}
@@ -49,20 +40,15 @@ Data: {data}
 
 async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
     """Generate written analysis and executive summary from CSV results."""
-    analysis = state.get("analysis_results")
+    analysis = state.get("analysis_results") or {}
     if not analysis:
+        error_msg = state.get("error") or "No analysis data available."
         return {
-            "insight_report": "No analysis data available.",
+            "insight_report": f"Analysis could not be completed. Details: {error_msg}",
             "executive_summary": "Analysis could not be completed.",
         }
 
-    if "data" in analysis:
-        data_sample = analysis["data"][:20]
-    else:
-        # Flatten non-tabular results (like trend, correlation)
-        data_sample = {k: v for k, v in analysis.items() if k not in ("plan", "source_type")}
-
-    llm = get_llm(temperature=0)
+    llm = get_llm(temperature=0.3)
 
     # Calculate complexity instructions
     idx = state.get("complexity_index", 1)
@@ -77,64 +63,80 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
         else:
             complexity_instruction = f"TONE: Investigative & Advanced. Dig into the 'why'."
 
+    def _sanitize_question(q: str) -> str:
+        """Extract text from JSON questions if they have history."""
+        try:
+            parsed = json.loads(q)
+            if isinstance(parsed, dict) and "text" in parsed:
+                return parsed["text"]
+        except:
+            pass
+        return q
+
+    clean_question = _sanitize_question(state.get("question") or "")
+    
+    # Use 'data' or 'dataframe'
+    df_data = analysis.get("data") or analysis.get("dataframe") or []
+
     prompt = INSIGHT_PROMPT.format(
-        question=state.get("question", ""),
+        question=clean_question,
         intent=state.get("intent", "comparison"),
-        data=json.dumps(data_sample, indent=2, default=str),
+        data=json.dumps(df_data[:20], indent=2, default=str),
         complexity_instruction=complexity_instruction
     )
 
+    content: str | None = None
     try:
-        res = await llm.ainvoke(prompt)
-        content = res.content
-        
+        response = await llm.ainvoke(prompt)
+        content = response.content
         parsed = _parse_json(content)
-        
+
         if not parsed:
-            logger.warning("csv_insight_parsing_failed", content=content)
-            return {
-                "insight_report": "Analysis was performed but the narrative report could not be formatted.",
-                "executive_summary": "Technical error during summary generation.",
-            }
+            logger.warning("csv_insight_parsing_empty", content=content)
+            raise ValueError("Parsed insight JSON is empty")
 
         return {
             "insight_report": parsed.get("insight_report", "Analysis completed."),
             "executive_summary": parsed.get("executive_summary", "See detailed report."),
         }
     except Exception as e:
-        logger.error("csv_insight_generation_failed", error=str(e))
+        logger.error("csv_insight_generation_failed", error=str(e), content=content)
         return {
-            "insight_report": "Analysis was performed but insight generation encountered an error.",
+            "insight_report": f"Analysis was performed but insight generation encountered an error: {str(e)[:100]}",
             "executive_summary": "Results are available in chart form.",
         }
 
 
-def _parse_json(content: Any) -> Dict[str, Any]:
-    """Ultra-resilient JSON parser for LLM responses."""
+def _parse_json(content: str) -> Dict[str, str]:
+    """Extract JSON object from LLM response with fallback extraction."""
     if not isinstance(content, str) or not content.strip():
         return {}
-
+    
     content = content.strip()
     
-    start_idx = content.find('{')
-    end_idx = content.rfind('}')
+    # Try to find JSON block first
+    json_match = re.search(r'\{[\s\S]*\}', content)
+    if json_match:
+        try:
+            raw_json = json_match.group().strip()
+            parsed = json.loads(raw_json)
+            for key in ["insight_report", "executive_summary"]:
+                if key in parsed and isinstance(parsed[key], str):
+                    val = parsed[key].strip()
+                    val = re.sub(r'^```[a-z]*\n|```$', '', val, flags=re.MULTILINE)
+                    parsed[key] = val
+            return parsed
+        except json.JSONDecodeError:
+            pass
     
-    if start_idx == -1 or end_idx == -1:
-        return {}
-
-    json_str = content[start_idx : end_idx + 1]
-
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        pass
-
-    try:
-        # Aggressive cleanup: remove trailing commas and control characters
-        cleaned = re.sub(r',\s*([\]}])', r'\1', json_str)
-        cleaned = re.sub(r'[\x00-\x1F\x7F]', '', cleaned)
-        return json.loads(cleaned)
-    except Exception:
-        pass
-
-    return {}
+    # Fallback: Extract fields using regex
+    result = {}
+    insight_match = re.search(r'["\']?insight_report["\']?\s*:\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if insight_match:
+        result["insight_report"] = insight_match.group(1)
+    
+    summary_match = re.search(r'["\']?executive_summary["\']?\s*:\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+    if summary_match:
+        result["executive_summary"] = summary_match.group(1)
+    
+    return result if result else {}

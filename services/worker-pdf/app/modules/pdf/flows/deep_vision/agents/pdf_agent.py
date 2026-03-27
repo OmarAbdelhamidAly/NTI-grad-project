@@ -57,7 +57,7 @@ def get_colpali():
 
 async def _get_doc_context(kb_id: Optional[str] = None, source_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Fetches the context_hint and company_profile for a given KB or Source.
+    Fetches the context_hint, industry, and company_profile for a given KB or Source.
     """
     try:
         async with async_session_factory() as db:
@@ -73,8 +73,11 @@ async def _get_doc_context(kb_id: Optional[str] = None, source_id: Optional[str]
                 res = await db.execute(query)
                 doc = res.scalars().first()
                 if doc:
+                    metadata = doc.metadata_json or {}
+                    dna = metadata.get("dna", {})
                     return {
                         "hint": doc.context_hint,
+                        "industry": dna.get("industry", "General Business"),
                         "profile": doc.kb.tenant.company_profile if doc.kb and doc.kb.tenant else None
                     }
             elif source_id:
@@ -82,8 +85,11 @@ async def _get_doc_context(kb_id: Optional[str] = None, source_id: Optional[str]
                 res = await db.execute(query)
                 src = res.scalar_one_or_none()
                 if src:
+                    schema = src.schema_json or {}
+                    metadata = schema.get("metadata", {})
                     return {
                         "hint": src.context_hint,
+                        "industry": metadata.get("industry", "General Business"),
                         "profile": None
                     }
             return {}
@@ -135,10 +141,12 @@ async def colpali_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
 
         # 3. Context
         hint = state.get("context_hint")
+        industry = state.get("industry")
         profile = None
-        if not hint:
+        if not hint or not industry:
              ctx = await _get_doc_context(kb_id, source_id)
              hint = ctx.get("hint")
+             industry = ctx.get("industry", "General Business")
              profile = ctx.get("profile")
 
         # 4. Extract Images
@@ -181,21 +189,28 @@ async def colpali_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
                         base64_images.append(base64.b64encode(buffered.getvalue()).decode("utf-8"))
 
         # 5. Synthesis
-        expert_persona = f"an expert in {hint} documents" if hint else "an advanced Visual Document Analyst"
+        expert_persona = f"an expert in {industry} documents" if industry else "an advanced Visual Document Analyst"
         
         history_arr = state.get("history", [])
         chat_history = "No previous conversational context."
         if history_arr:
             chat_history = "\n".join([f"[{msg['role'].upper()}]: {msg['content']}" for msg in history_arr])
 
-        prompt_text = f"You are {expert_persona}.\n\nCONVERSATIONAL MEMORY:\n{chat_history}\n\nQUESTION: {question}\n\nProvide an answer based ONLY on the visual context provided. Answer in the same language as the user's question (e.g. if asked in Arabic, answer in Arabic):"
+        prompt_text = f"""You are {expert_persona}.
+
+CONVERSATIONAL MEMORY:
+{chat_history}
+
+QUESTION: {question}
+
+Provide an answer based ONLY on the visual context provided. Answer in the same language as the user's question (e.g. if asked in Arabic, answer in Arabic):"""
         
         content = [{"type": "text", "text": prompt_text}]
         for b64_img in base64_images:
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
 
         # We MUST use a vision-capable model (Gemini) for this step
-        llm = get_llm(temperature=0, model="gemini-1.5-flash")
+        llm = get_llm(temperature=0, model="gemini-flash-latest")
         res = await llm.ainvoke([HumanMessage(content=content)])
         
         visual_context = [{"page_number": page_nums[i], "image_base64": f"data:image/jpeg;base64,{s}"} for i, s in enumerate(base64_images)]
@@ -203,7 +218,8 @@ async def colpali_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
         return {
             "insight_report": res.content,
             "executive_summary": f"Visual analysis completed. {len(search_results)} pages retrieved.",
-            "visual_context": visual_context
+            "visual_context": visual_context,
+            "industry": industry
         }
 
     except Exception as e:

@@ -33,6 +33,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("db_sync_started")
     try:
+        # Prevent multiple app instances from running the self-healing DDL concurrently.
+        # This avoids deadlocks / long lock waits during container restarts.
+        ADVISORY_LOCK_KEY = 987654321  # arbitrary constant for this app
+        async with engine.begin() as conn:
+            got_lock = await conn.scalar(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": ADVISORY_LOCK_KEY},
+            )
+
+        if not got_lock:
+            logger.warning("db_sync_skipped_advisory_lock_busy")
+            yield
+            return
+
         # 1. Create all missing tables (safe if they already exist)
         # Wrap in its own try/except to handle race conditions between workers
         try:
@@ -49,6 +63,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         async def _safe_exec(sql: str):
             try:
                 async with engine.begin() as conn:
+                    # Avoid indefinite startup hangs if Postgres is temporarily locked.
+                    # If a step can't complete quickly, we log and continue.
+                    await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    await conn.execute(text("SET LOCAL statement_timeout = '20s'"))
                     await conn.execute(text(sql))
             except Exception as e:
                 err_str = str(e).lower()
@@ -62,6 +80,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _safe_exec("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS thinking_steps JSON NULL")
         await _safe_exec("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS complexity_index INTEGER DEFAULT 1")
         await _safe_exec("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS total_pills INTEGER DEFAULT 1")
+        await _safe_exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS auth0_sub TEXT NULL")
         
         # Add columns for Data Sources and Documents Enhancements
         await _safe_exec("ALTER TABLE data_sources ADD COLUMN IF NOT EXISTS domain_type VARCHAR(30) NULL")
@@ -108,6 +127,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("db_sync_complete_successfully")
     except Exception as exc:
         logger.error("db_sync_critical_failure", error=str(exc))
+    finally:
+        # Best-effort unlock (no harm if we never acquired it).
+        try:
+            ADVISORY_LOCK_KEY = 987654321
+            async with engine.begin() as conn:
+                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+        except Exception:
+            pass
 
     yield
     logger.info("application_shutting_down")

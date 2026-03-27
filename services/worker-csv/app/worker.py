@@ -254,13 +254,16 @@ async def _execute_source_discovery(source_id: str, user_id: str):
             schema_json = {}
             if source.type == "csv" and source.file_path:
                 df = pd.read_csv(source.file_path)
-                from app.routers.data_sources import _profile_dataframe
+                from app.modules.csv.utils.profiler import _profile_dataframe
                 schema_json = _profile_dataframe(df)
             elif source.type == "sql":
-                from app.routers.data_sources import _profile_sqlite
-                # If it's a file-based sqlite
-                if source.file_path and os.path.exists(source.file_path):
-                    schema_json = _profile_sqlite(source.file_path)
+                # For consistency across workers
+                try: 
+                    from app.modules.sql.utils.schema_utils import _profile_sqlite
+                    if source.file_path and os.path.exists(source.file_path):
+                        schema_json = _profile_sqlite(source.file_path)
+                except ImportError:
+                    pass
             
             source.schema_json = schema_json
             source.indexing_status = "done"

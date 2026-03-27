@@ -15,7 +15,8 @@ _embed_model = None
 def get_embedding_model():
     global _embed_model
     if _embed_model is None:
-        _embed_model = TextEmbedding(model_name="intfloat/multilingual-e5-small")
+        # Using a highly compatible model for semantic caching
+        _embed_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
     return _embed_model
 
 def embed_text(text: str) -> list[float]:
@@ -36,9 +37,9 @@ async def check_cache(question: str, tenant_id: str, source_id: str) -> str | No
             return None
             
         vector = embed_text(question)
-        hits = await client.search(
+        hits = await client.query_points(
             collection_name=col_name,
-            query_vector=vector,
+            query=vector,
             query_filter=Filter(
                 must=[
                     FieldCondition(key="source_id", match=MatchValue(value=source_id))
@@ -47,6 +48,7 @@ async def check_cache(question: str, tenant_id: str, source_id: str) -> str | No
             limit=1,
             score_threshold=0.95
         )
+        hits = hits.points
         if hits:
             logger.info("semantic_cache_hit", score=hits[0].score, tenant_id=tenant_id, source_id=source_id)
             return hits[0].payload.get("answer")

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Mail, Lock, Building, ArrowRight, Loader2 } from 'lucide-react';
+import { Mail, Lock, Building, ArrowRight, Loader2, ShieldCheck } from 'lucide-react';
+import { useAuth0 } from '@auth0/auth0-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AuthAPI } from '../../services/api';
 import openqLogo from '../../assets/openq-logo.png';
@@ -12,6 +13,7 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { loginWithRedirect } = useAuth0();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -155,6 +157,26 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
                   <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                 </>
               )}
+            </button>
+
+            <div className="relative py-4">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-700/50"></div>
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-[#171033] px-2 text-slate-500 font-bold tracking-widest">Or Secure Protocol</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => loginWithRedirect()}
+              className="w-full bg-slate-800/40 hover:bg-slate-700/50 text-white border border-slate-700/50 font-bold py-3.5 rounded-xl transition-all flex items-center justify-center gap-3 backdrop-blur-md active:scale-95 group"
+            >
+              <div className="p-1.5 rounded-lg bg-white/5 border border-white/10 group-hover:bg-indigo-500/20 group-hover:border-indigo-500/30 transition-all">
+                <ShieldCheck className="w-4 h-4 text-indigo-400" />
+              </div>
+              Continue with Auth0
             </button>
           </form>
 

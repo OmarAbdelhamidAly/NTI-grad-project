@@ -3,7 +3,7 @@ import type { Message } from '../../hooks/useAnalysisPolling';
 import { LangGraphVisualizer } from './LangGraphVisualizer';
 import DynamicChart from '../Visualizations/DynamicChart';
 import MarkdownBlock from '../Visualizations/MarkdownBlock';
-import { User, Bot, ShieldAlert, CheckCircle2, Terminal, Volume2, VolumeX, Globe, Eye, Box, Lightbulb, ChevronRight, BarChart2 } from 'lucide-react';
+import { User, Bot, ShieldAlert, CheckCircle2, Terminal, Volume2, VolumeX, Globe, Eye, Box, Lightbulb, ChevronRight, BarChart2, FileDown, FileSpreadsheet, ImageDown } from 'lucide-react';
 import { AnalysisAPI } from '../../services/api';
 import { speaker } from '../../utils/speech';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -18,6 +18,18 @@ export default function MessageBubble({ message }: Props) {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
+  const handleApprove = async () => {
+    if (!message.job?.id) return;
+    setIsApproving(true);
+    try {
+      await AnalysisAPI.approveJob(message.job.id);
+    } catch (e) {
+      console.error('Approval failed', e);
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
   const toggleSpeech = () => {
     if (isSpeaking) {
       speaker.stop();
@@ -30,15 +42,20 @@ export default function MessageBubble({ message }: Props) {
     }
   };
 
-  const handleApprove = async () => {
+  const [isExporting, setIsExporting] = useState<string | null>(null);
+
+  const handleExport = async (format: 'pdf' | 'csv' | 'png') => {
     if (!message.job?.id) return;
-    setIsApproving(true);
+    setIsExporting(format);
     try {
-      await AnalysisAPI.approveJob(message.job.id);
+      const response = await AnalysisAPI.exportReport(message.job.id, format);
+      if (response.file_url) {
+        window.open(response.file_url, '_blank');
+      }
     } catch (e) {
-      console.error('Approval failed', e);
+      console.error('Export failed', e);
     } finally {
-      setIsApproving(false);
+      setIsExporting(null);
     }
   };
 
@@ -241,6 +258,37 @@ export default function MessageBubble({ message }: Props) {
                       <span className="text-[10px] font-black uppercase tracking-widest text-violet-400">Live Analytics Dashboard</span>
                     </div>
                     <DynamicChart config={message.job.chart_json} />
+                  </div>
+                )}
+
+                {/* Export Buttons */}
+                {message.job?.status === 'done' && (
+                  <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-800/50">
+                    <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest w-full mb-1">Export Report</span>
+                    <button
+                      onClick={() => handleExport('pdf')}
+                      disabled={isExporting === 'pdf'}
+                      className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                    >
+                      <FileDown className="w-3.5 h-3.5" />
+                      {isExporting === 'pdf' ? 'Generating...' : 'PDF'}
+                    </button>
+                    <button
+                      onClick={() => handleExport('csv')}
+                      disabled={isExporting === 'csv'}
+                      className="flex items-center gap-2 px-3 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      {isExporting === 'csv' ? 'Generating...' : 'CSV'}
+                    </button>
+                    <button
+                      onClick={() => handleExport('png')}
+                      disabled={isExporting === 'png'}
+                      className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                    >
+                      <ImageDown className="w-3.5 h-3.5" />
+                      {isExporting === 'png' ? 'Generating...' : 'PNG'}
+                    </button>
                   </div>
                 )}
               </div>

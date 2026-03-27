@@ -49,7 +49,8 @@ class QdrantMultiVectorManager:
         page_id: str, 
         colpali_vectors: List[List[float]], 
         muvera_vector: List[float],
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        wait: bool = False
     ):
         """Upsert a single page with multi-vector and MUVERA encoding."""
         self.client.upsert(
@@ -63,7 +64,33 @@ class QdrantMultiVectorManager:
                     },
                     payload=metadata
                 )
-            ]
+            ],
+            wait=wait
+        )
+
+    def upsert_batch(
+        self,
+        points: List[Dict[str, Any]],
+        wait: bool = False
+    ):
+        """Upsert multiple pages in a single batch."""
+        point_structs = []
+        for p in points:
+            point_structs.append(
+                models.PointStruct(
+                    id=p["id"],
+                    vector={
+                        "colpali": p["colpali_vectors"],
+                        "muvera": p["muvera_vector"]
+                    },
+                    payload=p["metadata"]
+                )
+            )
+        
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=point_structs,
+            wait=wait
         )
 
     def search_hybrid(

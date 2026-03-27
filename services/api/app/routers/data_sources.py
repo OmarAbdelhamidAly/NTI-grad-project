@@ -119,7 +119,8 @@ def _profile_sqlite(file_path: str) -> dict[str, Any]:
             "source_type": "sqlite",
             "dialect": "sqlite",
             "table_count": len(tables),
-            "total_columns": sum(t["column_count"] for t in result_tables),
+            "row_count": sum(t["row_count"] for t in result_tables if t["row_count"]),
+            "column_count": sum(t["column_count"] for t in result_tables),
             "tables": result_tables,
             "foreign_keys": final_fks,
             "mermaid_erd": mermaid_erd,
@@ -128,6 +129,17 @@ def _profile_sqlite(file_path: str) -> dict[str, Any]:
                 for t in result_tables
                 for c in t["columns"]
             ],
+            "columns": [
+                {
+                    "name": f"{t['table']}.{c['name']}",
+                    "dtype": c["dtype"],
+                    "null_count": 0, # Placeholder
+                    "unique_count": 0, # Placeholder
+                    "sample_values": c.get("sample_values", [])
+                }
+                for t in result_tables
+                for c in t["columns"]
+            ]
         }
     finally:
         engine.dispose()
@@ -263,7 +275,7 @@ async def upload_file(
             filename=file.filename,
         )
         from app.worker import celery_app
-        celery_app.send_task("process_source_indexing", args=[str(source.id)], queue="pillar.pdf")
+        celery_app.send_task("process_source_indexing", args=[str(source.id)], queue="knowledge")
         return DataSourceResponse.model_validate(source)
 
     # ── JSON Document ───────────────────────────────────────────────────
@@ -522,6 +534,29 @@ async def delete_data_source(
         source_id=str(source.id),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{source_id}", response_model=DataSourceResponse)
+async def get_data_source(
+    source_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DataSourceResponse:
+    """Get a single data source by ID."""
+    await verify_permission("query", str(source_id), current_user, db)
+    result = await db.execute(
+        select(DataSource).where(
+            DataSource.id == source_id,
+            DataSource.tenant_id == current_user.tenant_id,
+        )
+    )
+    source = result.scalar_one_or_none()
+    if source is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Data source not found",
+        )
+    return DataSourceResponse.model_validate(source)
 
 
 @router.get("/{source_id}/dashboard", response_model=DataSourceResponse)

@@ -9,9 +9,20 @@ from app.domain.analysis.entities import AnalysisState
 
 logger = structlog.get_logger(__name__)
 
+import uuid
+from app.infrastructure.config import settings
+from app.infrastructure.database.postgres import async_session_factory
+from app.models.data_source import DataSource
+from app.models.knowledge import Document
+from sqlalchemy import select
+
 # Initialize the LLM (Ensure GOOGLE_API_KEY is configured in the environment)
 try:
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-flash-latest", 
+        temperature=0,
+        google_api_key=settings.GOOGLE_API_KEY
+    )
 except Exception as e:
     logger.warning("gemini_init_failed", error=str(e))
     llm = None
@@ -46,13 +57,27 @@ async def hybrid_ocr_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
     Native text is extracted instantly via PyMuPDF.
     Image blocks are selectively sent to a VLM (Gemini Flash).
     """
-    logger.info("hybrid_ocr_agent_started", source_id=state["source_id"])
+    source_id = state.get("source_id")
+    kb_id = state.get("kb_id")
     
-    pdf_path = f"/tmp/tenants/{state['tenant_id']}/{state['source_id']}.pdf"
+    logger.info("hybrid_ocr_agent_started", source_id=source_id, kb_id=kb_id)
     
-    if not os.path.exists(pdf_path):
-        logger.warning("pdf_not_found_locally", path=pdf_path)
-        return {"visual_context": [{"page": 1, "text": "PDF not found locally for Hybrid OCR."}]}
+    pdf_path = None
+    
+    # Resolve path from database instead of hardcoding /tmp
+    async with async_session_factory() as db:
+        if source_id:
+            res = await db.execute(select(DataSource).where(DataSource.id == uuid.UUID(source_id)))
+            obj = res.scalar_one_or_none()
+            if obj: pdf_path = obj.file_path
+        elif kb_id:
+            res = await db.execute(select(Document).where(Document.kb_id == uuid.UUID(kb_id)))
+            obj = res.scalars().first()
+            if obj: pdf_path = obj.file_path
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        logger.warning("pdf_not_found", path=pdf_path)
+        return {"visual_context": [{"page": 1, "text": f"PDF not found at {pdf_path}. Cannot perform Hybrid OCR."}]}
         
     doc = fitz.open(pdf_path)
     visual_context = []

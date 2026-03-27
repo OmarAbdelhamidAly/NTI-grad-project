@@ -35,11 +35,14 @@ async def get_superset_client() -> httpx.AsyncClient:
 
 async def get_or_create_database(client: httpx.AsyncClient, db_name: str, sqlalchemy_uri: str) -> int:
     """Finds or creates a database connection in Superset."""
+    logger.info("superset_database_request", db_name=db_name, uri_prefix=sqlalchemy_uri[:50])
+    
     # Search
     q = json.dumps({"filters": [{"col": "database_name", "opr": "eq", "value": db_name}]})
     resp = await client.get(f"{SUPERSET_URL}/api/v1/database/?q={q}")
     dbs = resp.json().get("result", [])
     if dbs:
+        logger.info("superset_database_found", db_id=dbs[0]["id"])
         return dbs[0]["id"]
         
     # Create
@@ -48,11 +51,15 @@ async def get_or_create_database(client: httpx.AsyncClient, db_name: str, sqlalc
         "sqlalchemy_uri": sqlalchemy_uri,
         "extra": json.dumps({"allows_virtual_table_explore": True})
     }
+    logger.info("superset_creating_database", db_name=db_name)
     resp = await client.post(f"{SUPERSET_URL}/api/v1/database/", json=payload)
     if resp.status_code not in (200, 201):
+        logger.error("superset_database_create_failed", status=resp.status_code, body=resp.text[:500])
         raise ValueError(f"Failed to create Superset DB: {resp.text}")
-        
-    return resp.json()["id"]
+    
+    db_id = resp.json()["id"]
+    logger.info("superset_database_created", db_id=db_id)
+    return db_id
 
 async def create_virtual_dataset(client: httpx.AsyncClient, db_id: int, sql: str, table_name: str) -> int:
     """Creates a virtual dataset (SQL query) in Superset."""

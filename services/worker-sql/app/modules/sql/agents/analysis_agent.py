@@ -138,6 +138,19 @@ async def analysis_agent(state: AnalysisState) -> Dict[str, Any]:
                 "Check that the data source file_path is correct and the file exists."
             )
         }
+    # ── FAST-TRACK: Check for Meta-Questions (Schema/Structural) ────────────────
+    meta_result = _handle_meta_question(state["question"], schema_summary)
+    if meta_result:
+        return {
+            "analysis_results": {
+                "plan": {"query": "meta_bypass", "summary": "Skipped LLM for structural question"},
+                "source_type": "sql",
+                "data": meta_result["dataframe"].to_dict(orient="records"),
+                "summary": meta_result["title"]
+            },
+            "error": None,
+            "intermediate_steps": [{"role": "thought", "content": "Meta-question detected. Bypassing LLM."}]
+        }
     # ───────────────────────────────────────────────────────────────────────────
 
     # Currently using Groq/Llama-8b for free tier speed.
@@ -343,6 +356,36 @@ async def analysis_agent(state: AnalysisState) -> Dict[str, Any]:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _handle_meta_question(question: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Answer questions ABOUT the database structure directly — no LLM needed."""
+    import pandas as pd
+    q = question.lower().strip()
+    tables = schema.get("tables", [])
+    
+    # 1. Table Count
+    if any(p in q for p in ["how many table", "number of table", "count of table", "list of table", "what tables"]):
+        rows = [{"table_name": t["table"], "description": t.get("description", "N/A")} for t in tables]
+        result_df = pd.DataFrame(rows)
+        return {"dataframe": result_df, "title": f"Database has {len(tables)} tables"}
+
+    # 2. Specific Table Structure
+    # Check if a table name from the schema is mentioned in the query
+    target_table = next((t["table"] for t in tables if t["table"].lower() in q), None)
+    if target_table and any(p in q for p in ["columns in", "fields in", "schema of", "describe", "what is in", "tell me about"]):
+        t_info = next(t for t in tables if t["table"] == target_table)
+        rows = [{"column": c["name"], "type": c.get("dtype", "unknown"), "description": c.get("description", "")} for c in t_info["columns"]]
+        result_df = pd.DataFrame(rows)
+        return {"dataframe": result_df, "title": f"Schema for table '{target_table}'"}
+
+    # 3. ERD / Relationships
+    if any(p in q for p in ["relationship", "erd", "diagram", "how is it connected", "linked"]):
+        erd = schema.get("mermaid_erd", "No relationship diagram available.")
+        result_df = pd.DataFrame([{"mermaid_erd": erd}])
+        return {"dataframe": result_df, "title": "Database Relationship Overview"}
+
+    return None
+
 
 def _parse_json(content: str) -> Dict[str, Any]:
     """Extract and parse JSON from LLM response, handling markers or raw text."""

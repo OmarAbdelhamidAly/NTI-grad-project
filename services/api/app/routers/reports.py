@@ -63,7 +63,7 @@ async def _get_job_and_result(
     return job, analysis_result
 
 
-@router.get("/{job_id}/pdf")
+@router.post("/{job_id}/pdf")
 async def download_pdf(
     job_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -75,7 +75,7 @@ async def download_pdf(
     # Dispatch to specialized worker
     worker = _get_worker()
     task = worker.send_task("generate_export_task", args=[str(job_id), "pdf"], queue="exporter")
-    res = task.get(timeout=30) # Synchronous wait for premium generation
+    res = task.get(timeout=60) # Increased timeout for premium rendering
     
     if "error" in res:
         raise HTTPException(status_code=500, detail=res["error"])
@@ -89,7 +89,7 @@ async def download_pdf(
     )
 
 
-@router.get("/{job_id}/png")
+@router.post("/{job_id}/png")
 async def download_png(
     job_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -101,7 +101,7 @@ async def download_png(
     # Dispatch to specialized worker
     worker = _get_worker()
     task = worker.send_task("generate_export_task", args=[str(job_id), "png"], queue="exporter")
-    res = task.get(timeout=30)
+    res = task.get(timeout=60)
     
     if "error" in res:
         raise HTTPException(status_code=500, detail=res["error"])
@@ -115,7 +115,7 @@ async def download_png(
     )
 
 
-@router.get("/{job_id}/csv")
+@router.post("/{job_id}/csv")
 async def download_csv(
     job_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -127,7 +127,7 @@ async def download_csv(
     # Dispatch to specialized worker
     worker = _get_worker()
     task = worker.send_task("generate_export_task", args=[str(job_id), "csv"], queue="exporter")
-    res = task.get(timeout=30)
+    res = task.get(timeout=60)
     
     if "error" in res:
         raise HTTPException(status_code=500, detail=res["error"])

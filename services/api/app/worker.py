@@ -32,12 +32,17 @@ celery_app.conf.update(
 
 @celery_app.task(name="process_document_indexing")
 def process_document_indexing(doc_id: str):
-    return asyncio.run(_execute_indexing(doc_id))
+    """Proxy to PDF worker for KB document indexing."""
+    celery_app.send_task(
+        "process_document_indexing",
+        args=[doc_id],
+        queue="pillar.pdf"
+    )
+    return {"status": "indexing_triggered"}
+
 
 async def _execute_indexing(doc_id: str):
-    # (Original indexing logic preserved)
-    from app.infrastructure.database.postgres import async_session_factory
-    # ... logic from previous worker.py ...
+    # Deprecated: logic moved to worker-pdf service
     pass
 
 # ── 4. Auto-Analysis (Post-Upload Discovery) ──────────────────────────────

@@ -141,3 +141,97 @@ def infer_foreign_keys(tables: List[Dict[str, Any]], existing_fks: List[Dict[str
                             existing_map.add((t1["table"].lower(), c1["name"].lower(), t2["table"].lower()))
 
     return foreign_keys
+
+def _profile_sqlite(file_path: str) -> Dict[str, Any]:
+    """Build a schema profile from an uploaded SQLite file."""
+    from sqlalchemy import create_engine, inspect, text
+    import os
+
+    conn_str = f"sqlite:///{file_path}"
+    engine = create_engine(conn_str)
+    try:
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        result_tables = []
+        all_fks = []
+
+        for table_name in tables:
+            columns = inspector.get_columns(table_name)
+            pk_cols = inspector.get_pk_constraint(table_name).get("constrained_columns", [])
+            
+            # Extract literal FKs
+            fks = inspector.get_foreign_keys(table_name)
+            for fk in fks:
+                for idx, from_col in enumerate(fk["constrained_columns"]):
+                    all_fks.append({
+                        "from_table": table_name,
+                        "from_col": from_col,
+                        "to_table": fk["referred_table"],
+                        "to_col": fk["referred_columns"][idx]
+                    })
+
+            col_infos = []
+            for col in columns:
+                col_info = {
+                    "name": col["name"],
+                    "dtype": str(col["type"]),
+                    "nullable": col.get("nullable", True),
+                    "primary_key": col["name"] in pk_cols,
+                }
+                # Sample values logic
+                try:
+                    with engine.connect() as conn:
+                        rows = conn.execute(
+                            text(f'SELECT "{col["name"]}" FROM "{table_name}" WHERE "{col["name"]}" IS NOT NULL LIMIT 3')
+                        ).fetchall()
+                    col_info["sample_values"] = [str(r[0]) for r in rows]
+                except Exception:
+                    col_info["sample_values"] = []
+                col_infos.append(col_info)
+
+            # Row count
+            try:
+                with engine.connect() as conn:
+                    row_count = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar()
+            except Exception:
+                row_count = None
+
+            result_tables.append({
+                "table": table_name,
+                "columns": col_infos,
+                "column_count": len(col_infos),
+                "row_count": row_count,
+            })
+
+        # Infer additional relationships
+        final_fks = infer_foreign_keys(result_tables, all_fks)
+        mermaid_erd = generate_mermaid_erd(result_tables, final_fks)
+
+        return {
+            "source_type": "sqlite",
+            "dialect": "sqlite",
+            "table_count": len(tables),
+            "row_count": sum(t["row_count"] for t in result_tables if t["row_count"]),
+            "column_count": sum(t["column_count"] for t in result_tables),
+            "tables": result_tables,
+            "foreign_keys": final_fks,
+            "mermaid_erd": mermaid_erd,
+            "all_column_names": [
+                f"{t['table']}.{c['name']}"
+                for t in result_tables
+                for c in t["columns"]
+            ],
+            "columns": [
+                {
+                    "name": f"{t['table']}.{c['name']}",
+                    "dtype": c["dtype"],
+                    "null_count": 0,
+                    "unique_count": 0,
+                    "sample_values": c.get("sample_values", [])
+                }
+                for t in result_tables
+                for c in t["columns"]
+            ]
+        }
+    finally:
+        engine.dispose()

@@ -58,6 +58,29 @@ export default function KnowledgeHubView() {
     }
   };
 
+  // Real-time status polling for indexing
+  useEffect(() => {
+    let interval: any;
+    const hasProcessingDocs = documents.some(d => d.status === 'pending' || d.status === 'processing' || d.status === 'running');
+    
+    if (hasProcessingDocs && selectedKb) {
+      interval = setInterval(async () => {
+        try {
+          const docs = await KnowledgeAPI.listDocuments(selectedKb.id);
+          setDocuments(docs);
+          
+          // Also refresh KB list to get updated doc counts
+          const kbs = await KnowledgeAPI.list();
+          setKbList(kbs);
+        } catch (e) {
+          console.error("Polling failed", e);
+        }
+      }, 3000); // 3 second intervals for real-time feel
+    }
+    
+    return () => clearInterval(interval);
+  }, [documents, selectedKb]);
+
   const handleCreateKb = async (e: any) => {
     e.preventDefault();
     const formData = new FormData(e.target);
@@ -329,16 +352,6 @@ export default function KnowledgeHubView() {
                    </div>
 
                    <div className="flex-1 overflow-y-auto px-8 py-6 custom-scroll">
-                      {isUploading && (
-                        <div className="mb-6 p-6 rounded-2xl bg-indigo-500/5 border border-indigo-500/30 animate-pulse flex items-center justify-between">
-                           <div className="flex items-center gap-4">
-                              <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
-                              <span className="text-sm font-black text-white uppercase tracking-widest">Ingesting Context into Neural Layer...</span>
-                           </div>
-                           <span className="text-xs font-black text-indigo-400">54%</span>
-                        </div>
-                      )}
-
                       <div className="space-y-2">
                          {documents.length === 0 ? (
                            <div className="p-20 text-center flex flex-col items-center gap-4">
@@ -346,29 +359,62 @@ export default function KnowledgeHubView() {
                               <p className="text-xs font-bold text-slate-600 uppercase tracking-widest">No documents indexed in this collection</p>
                            </div>
                          ) : (
-                           documents.map((doc) => (
-                             <div key={doc.id} className="p-6 hover:bg-white/5 rounded-2xl transition-all group flex items-center justify-between border border-transparent hover:border-slate-800">
-                                <div className="flex items-center gap-5">
-                                   <div className="w-12 h-12 rounded-2xl bg-slate-800 flex items-center justify-center text-slate-500 group-hover:bg-indigo-500/10 group-hover:text-indigo-400 transition-all">
-                                      <BookOpen className="w-5 h-5" />
-                                   </div>
-                                   <div>
-                                      <p className="font-bold text-white uppercase text-sm">{doc.name}</p>
-                                      <div className="flex items-center gap-3 mt-1">
-                                         <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest ${doc.status === 'indexed' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
-                                            {doc.status}
-                                         </span>
-                                         <span className="text-[8px] font-bold text-slate-600 uppercase">Synchronized {new Date(doc.created_at).toLocaleDateString()}</span>
-                                      </div>
-                                   </div>
-                                </div>
-                                <button onClick={() => handleDeleteDoc(doc.id)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-700 hover:text-red-400 transition-all">
-                                   <Trash2 className="w-4 h-4" />
-                                </button>
+                           documents.map((doc) => {
+                             const isProcessing = doc.status === 'pending' || doc.status === 'processing' || doc.status === 'running';
+                             const progress = doc.metadata_json?.progress || 0;
+                             const currentStep = doc.metadata_json?.current_step || 'Initializing neural sync...';
+
+                             return (
+                               <div key={doc.id} className="p-6 hover:bg-white/5 rounded-2xl transition-all group flex flex-col gap-4 border border-transparent hover:border-slate-800">
+                                  <div className="flex items-center justify-between">
+                                     <div className="flex items-center gap-5">
+                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isProcessing ? 'bg-indigo-600/20 text-indigo-400 animate-pulse' : 'bg-slate-800 text-slate-500 group-hover:bg-indigo-500/10 group-hover:text-indigo-400'}`}>
+                                           <BookOpen className="w-5 h-5" />
+                                        </div>
+                                        <div>
+                                           <p className="font-bold text-white uppercase text-sm">{doc.name}</p>
+                                           <div className="flex items-center gap-3 mt-1">
+                                              <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest ${doc.status === 'done' || doc.status === 'indexed' ? 'bg-emerald-500/10 text-emerald-400' : isProcessing ? 'bg-indigo-500/10 text-indigo-400' : 'bg-red-500/10 text-red-400'}`}>
+                                                 {doc.status}
+                                              </span>
+                                              <span className="text-[8px] font-bold text-slate-600 uppercase">Synchronized {new Date(doc.created_at).toLocaleDateString()}</span>
+                                           </div>
+                                        </div>
+                                     </div>
+                                     <button onClick={() => handleDeleteDoc(doc.id)} className={`${isProcessing ? 'hidden' : 'opacity-0 group-hover:opacity-100'} p-2 text-slate-700 hover:text-red-400 transition-all`}>
+                                        <Trash2 className="w-4 h-4" />
+                                     </button>
+                                  </div>
+
+                                  {isProcessing && (
+                                    <div className="space-y-3 px-2">
+                                       <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest">
+                                          <span className="text-indigo-400 flex items-center gap-2">
+                                             <Loader2 className="w-3 h-3 animate-spin" />
+                                             {currentStep}
+                                          </span>
+                                          <span className="text-white">{progress}%</span>
+                                       </div>
+                                       <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                          <motion.div 
+                                             initial={{ width: 0 }}
+                                             animate={{ width: `${progress}%` }}
+                                             className="h-full bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]"
+                                          />
+                                       </div>
+                                    </div>
+                                  )}
+                               </div>
+                             );
+                           }))
+                         }
+                         {isUploading && (
+                             <div className="p-4 mt-4 rounded-xl bg-indigo-500/5 border border-indigo-500/10 animate-pulse flex items-center gap-3">
+                                <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />
+                                <span className="text-[9px] font-black text-indigo-400 uppercase tracking-widest">Neural Sync In Progress...</span>
                              </div>
-                           ))
-                         )}
-                      </div>
+                          )}
+                        </div>
                    </div>
                  </>
                ) : (

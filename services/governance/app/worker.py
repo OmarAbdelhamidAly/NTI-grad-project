@@ -245,10 +245,13 @@ async def _execute_governance(job_id: str) -> dict:
             await db.commit()
         return {"error": str(e)}
     finally:
+        # Cleanup: Only dispose if event loop is still running
         try:
-            from app.infrastructure.database.postgres import engine
-            await engine.dispose()
-            await redis_client.aclose()
+            import asyncio
+            if asyncio.get_event_loop().is_running():
+                from app.infrastructure.database.postgres import engine
+                await engine.dispose()
+                await redis_client.aclose()
         except Exception:
             pass
 

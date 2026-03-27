@@ -237,6 +237,11 @@ export const AnalysisAPI = {
       params: { dashboard_id: dashboardId }
     });
     return res.data;
+  },
+  
+  exportReport: async (jobId: string, format: 'pdf' | 'csv' | 'png'): Promise<{ file_url: string, status: string }> => {
+    const res = await apiClient.post(`/reports/${jobId}/${format}`);
+    return res.data;
   }
 };
 

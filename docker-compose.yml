@@ -66,8 +66,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 2G
+          cpus: '1.5'
+          memory: 4G
 
   # ── Ollama (Local LLM Backend) ─────────────────────────────
   ollama:
@@ -145,6 +145,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
       SQLITE_BASE_DIR: /tmp/tenants
+      SUPERSET_URL: http://superset:8088
     volumes:
       - tenant_uploads:/tmp/tenants
       - ./services/worker-sql:/app
@@ -166,6 +167,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/analyst_agent
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
+      SUPERSET_URL: http://superset:8088
     volumes:
       - tenant_uploads:/tmp/tenants
       - ./services/worker-csv:/app
@@ -188,6 +190,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
       MONGO_URI: mongodb://mongodb:27017
+      SUPERSET_URL: http://superset:8088
     volumes:
       - tenant_uploads:/tmp/tenants
       - ./services/worker-json:/app
@@ -208,9 +211,10 @@ services:
     volumes: [mongodata:/data/db]
     networks: [backend-net]
 
-  worker-pdf:
+  # ── PDF Workers: Separate Indexing & Analysis ──────────────
+  worker-pdf-indexing:
     build: { context: ./services/worker-pdf, dockerfile: Dockerfile.worker }
-    container_name: analyst-worker-pdf
+    container_name: analyst-worker-pdf-indexing
     restart: unless-stopped
     env_file: [.env]
     environment:
@@ -218,17 +222,42 @@ services:
       REDIS_URL: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
       HF_HOME: /app/hf_cache
+      WORKER_TYPE: indexing
     volumes:
       - tenant_uploads:/tmp/tenants
       - ./services/worker-pdf:/app
       - hf_cache:/app/hf_cache
     networks: [backend-net]
-    command: ["celery", "-A", "app.worker", "worker", "-Q", "pillar.pdf,knowledge", "--loglevel=info", "--concurrency=1"]
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "knowledge", "--loglevel=info", "--concurrency=3"]
     deploy:
       resources:
         limits:
-          cpus: '2.0'
-          memory: 8G
+          cpus: '3.0'
+          memory: 14G
+    depends_on: [redis, postgres, ollama, qdrant]
+
+  worker-pdf-analysis:
+    build: { context: ./services/worker-pdf, dockerfile: Dockerfile.worker }
+    container_name: analyst-worker-pdf-analysis
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/analyst_agent
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      HF_HOME: /app/hf_cache
+      WORKER_TYPE: analysis
+    volumes:
+      - tenant_uploads:/tmp/tenants
+      - ./services/worker-pdf:/app
+      - hf_cache:/app/hf_cache
+    networks: [backend-net]
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "pillar.pdf", "--loglevel=info", "--concurrency=3"]
+    deploy:
+      resources:
+        limits:
+          cpus: '3.0'
+          memory: 14G
     depends_on: [redis, postgres, ollama, qdrant]
 
   # ── Layer 4: Export Service ─────────────────────────────────

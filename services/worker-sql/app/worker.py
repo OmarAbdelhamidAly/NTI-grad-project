@@ -252,7 +252,7 @@ async def _execute_source_discovery(source_id: str, user_id: str):
         try:
             schema_json = {}
             if source.type == "sql":
-                from app.routers.data_sources import _profile_sqlite
+                from app.modules.sql.utils.schema_utils import _profile_sqlite
                 # If it's a file-based sqlite
                 if source.file_path and os.path.exists(source.file_path):
                     schema_json = _profile_sqlite(source.file_path)

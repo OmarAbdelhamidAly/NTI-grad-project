@@ -1,5 +1,13 @@
+"""CSV Pipeline — Visualization Agent.
+
+Generates premium Plotly.js Figure configurations dynamically via LLM for CSV data.
+Learned from the high-performance SQL implementation.
+"""
+
+from __future__ import annotations
+
 import json
-import uuid
+import re
 import structlog
 from typing import Any, Dict
 
@@ -7,93 +15,232 @@ logger = structlog.get_logger(__name__)
 
 from app.infrastructure.llm import get_llm
 from app.domain.analysis.entities import AnalysisState
-from app.modules.csv.tools.superset_client import (
-    get_superset_client,
-    get_or_create_database,
-    create_virtual_dataset,
-    create_chart,
-    create_dashboard
-)
-from app.modules.csv.tools.load_data_source import get_connection_string
 
-SUPERSET_VIZ_PROMPT = """You are a Principal Data Scientist and Lead Visualization Architect.
-Your core directive is to automatically configure premium, highly-insightful Apache Superset dashboards for CSV data.
+# ── Design Token Constants ────────────────────────────────────────────────────
+_COLORWAY = ["#6366f1", "#10b981", "#f43f5e", "#fbbf24", "#8b5cf6", "#06b6d4"]
+_FONT_FAMILY = '"Inter", "system-ui", sans-serif'
+_FONT_COLOR = "#f8fafc"
+_GRID_COLOR = "rgba(255,255,255,0.05)"
+_TRANSPARENT = "rgba(0,0,0,0)"
 
-### CHART INTELLIGENCE & SELECTION HEURISTICS
-Apply the same heuristics as for SQL data. Choose from:
-- echarts_timeseries_bar, echarts_timeseries_line, echarts_area, pie, table, big_number_total, treemap_v2, sunburst_v2, radar, bubble.
+# ── LLM Prompt ────────────────────────────────────────────────────────────────
+PLOTLY_VIZ_PROMPT = """You are a Principal Data Scientist and Visualization Architect specializing in Plotly.js.
+Your task is to design a premium, insight-driven Plotly Figure JSON configuration for a dark-mode analytics dashboard based on CSV data analysis.
 
-### EXECUTION DIRECTIVES
-- Return ONLY a valid JSON object with "viz_type" and "params".
-- No markdown formatting.
+---
+### CHART SELECTION HEURISTICS
+Choose the SINGLE most statistically powerful chart type from the rules below:
+
+| Scenario                                    | Plotly Trace Type         | Notes                                      |
+|---------------------------------------------|---------------------------|--------------------------------------------|
+| Time-series or sequential trends            | scatter (mode="lines")    | Use x_col = date/time column               |
+| Categorical comparisons (3–12 categories)   | bar                       | orientation="v" by default                 |
+| Single total or executive KPI               | indicator                 | Use mode="number" or "number+delta"        |
+| Part-to-whole / proportions (≤ 7 segments)  | pie                       | Add hole=0.45 for a modern donut style     |
+| Hierarchical / nested categories            | treemap                   | Use labels + parents + values              |
+| Correlation between 2-3 numeric metrics     | scatter                   | Use mode="markers"                         |
+| Multi-metric entity profiling               | scatterpolar              | Radar / spider chart                       |
+| Distribution of a numeric column            | histogram                 | Use nbinsx=20                              |
+
+---
+### STRICT OUTPUT FORMAT
+You MUST return a single, valid JSON object with exactly two keys:
+
+1. `"should_visualize"` (boolean): `true` if a chart meaningfully enhances understanding.
+   Set to `false` ONLY for trivial results (single row, raw schema description).
+
+2. `"figure"` (object): A complete Plotly Figure with `"data"` and `"layout"` keys.
+   - `"data"`: Array of one or more trace objects.
+   - `"layout"`: Axis labels, title, and cosmetic keys (do NOT include colors — those are injected server-side).
+
+---
+### TRACE CONSTRUCTION RULES
+- ALL column values used in traces MUST come verbatim from the `Columns` list below.
+- For `bar` / `scatter` traces, set `"x"` and `"y"` to the *column name strings*.
+- For `pie` traces, set `"labels"` and `"values"` to the *column name strings*.
+- Set `"name"` on each trace equal to the column or category it represents.
+
+---
+### LAYOUT RULES
+- Set `"title.text"` to a concise, insightful chart title.
+- Set axis `"title.text"` to human-readable labels.
+- Do NOT set colors, fonts, backgrounds — those are injected automatically.
+
+---
+### INPUT CONTEXT
+
+**Intent**: {intent}
+**User Question**: {question}
+**Pandas Action**: {plan_summary}
+**Columns**: {columns}
+**Data Sample** (up to 10 rows):
+```json
+{data}
+```
+
+---
+Return ONLY a valid JSON object. NO markdown fences. NO explanation. NO preamble.
 """
 
+# ── Premium Dark-Mode Layout Defaults ─────────────────────────────────────────
+_BASE_LAYOUT: Dict[str, Any] = {
+    "paper_bgcolor": _TRANSPARENT,
+    "plot_bgcolor": _TRANSPARENT,
+    "font": {
+        "family": _FONT_FAMILY,
+        "color": _FONT_COLOR,
+        "size": 13,
+    },
+    "colorway": _COLORWAY,
+    "hovermode": "x unified",
+    "hoverlabel": {
+        "bgcolor": "rgba(15,15,30,0.9)",
+        "bordercolor": "rgba(255,255,255,0.15)",
+        "font": {"family": _FONT_FAMILY, "color": _FONT_COLOR, "size": 12},
+    },
+    "legend": {
+        "bgcolor": "rgba(255,255,255,0.04)",
+        "bordercolor": "rgba(255,255,255,0.08)",
+        "borderwidth": 1,
+        "font": {"color": _FONT_COLOR},
+    },
+    "margin": {"l": 60, "r": 30, "t": 60, "b": 60},
+    "xaxis": {
+        "gridcolor": _GRID_COLOR,
+        "linecolor": "rgba(255,255,255,0.1)",
+        "tickfont": {"color": _FONT_COLOR},
+        "title": {"font": {"color": _FONT_COLOR}},
+        "zerolinecolor": "rgba(255,255,255,0.08)",
+    },
+    "yaxis": {
+        "gridcolor": _GRID_COLOR,
+        "linecolor": "rgba(255,255,255,0.1)",
+        "tickfont": {"color": _FONT_COLOR},
+        "title": {"font": {"color": _FONT_COLOR}},
+        "zerolinecolor": "rgba(255,255,255,0.08)",
+    },
+    "title": {
+        "font": {"family": _FONT_FAMILY, "color": _FONT_COLOR, "size": 18},
+        "x": 0.04,
+        "xanchor": "left",
+    },
+}
+
+_RESPONSIVE_CONFIG: Dict[str, Any] = {"responsive": True, "displayModeBar": False}
+
+
 async def visualization_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Generate a Superset Chart and Dashboard dynamically for CSV data."""
+    """Generate a native Plotly Figure configuration for CSV data."""
     analysis = state.get("analysis_results") or {}
-    if not analysis or not analysis.get("data"):
-        return {"chart_json": None}
+    df_data = analysis.get("data") or analysis.get("dataframe")
+    
+    if not analysis or not df_data:
+        logger.warning("visualization_skipped_no_data", job_id=state.get("job_id"))
+        return {"chart_json": None, "chart_engine": "plotly"}
 
     llm = get_llm(temperature=0)
-    data_sample = analysis["data"][:10]
+    data_sample = df_data[:10]
     
-    prompt = SUPERSET_VIZ_PROMPT + f"\n\nIntent: {state.get('intent')}\nQuestion: {state.get('question')}\nColumns: {json.dumps(analysis.get('columns', []))}\nData: {json.dumps(data_sample, indent=2, default=str)}"
+    plan = analysis.get("plan") or {}
+    plan_summary = plan.get("summary") or plan.get("operation", "Custom analysis")
 
+    prompt = PLOTLY_VIZ_PROMPT.format(
+        intent=state.get("intent", "comparison"),
+        question=state.get("question", "Analysis"),
+        plan_summary=plan_summary,
+        columns=json.dumps(analysis.get("columns", [])),
+        data=json.dumps(data_sample, indent=2, default=str),
+    )
+
+    content: str | None = None
     try:
         response = await llm.ainvoke(prompt)
-        chart_config = _parse_json(response.content)
+        content = response.content
+        viz_config = _parse_json(content)
 
-        if not chart_config or "viz_type" not in chart_config or "params" not in chart_config:
-            chart_config = {"viz_type": "table", "params": {"all_columns": analysis.get("columns", [])}}
-        
-        # Add color scheme
-        chart_config["params"]["color_scheme"] = "supersetColors"
-            
-        client = await get_superset_client()
-        try:
-            # The worker-csv analysis_agent returns transformed data (forecast, etc.) in `analysis["data"]`.
-            # To chart this transformed data in Superset, we must ingest it back into Postgres as a new table.
-            conn_string = get_connection_string(state)
-            db_id = await get_or_create_database(client, f"Analytic DB {state.get('source_id')}", conn_string)
-            
-            import pandas as pd
-            from sqlalchemy import create_engine
-            
-            res_table_name = f"res_{str(uuid.uuid4())[:8]}"
-            df = pd.DataFrame(analysis["data"])
-            
-            # Convert any complex types to string before saving
-            for c in df.columns:
-                if df[c].dtype == 'object':
-                    df[c] = df[c].astype(str)
-                    
-            engine = create_engine(conn_string)
-            df.to_sql(res_table_name, engine, if_exists='replace', index=False)
-            
-            sql = f"SELECT * FROM {res_table_name}"
-            dataset_id = await create_virtual_dataset(client, db_id, sql=sql, table_name=f"ds_{str(uuid.uuid4())[:8]}")
-            
-            dashboard_id, internal_uuid, embedded_uuid = await create_dashboard(client, state.get("question", "CSV Analysis Dashboard"))
-            await create_chart(client, dataset_id, state.get("question", "Chart"), chart_config["viz_type"], chart_config["params"], dashboard_id=dashboard_id)
+        if not viz_config.get("should_visualize", True):
+            return {"chart_json": None, "chart_engine": "plotly"}
 
-            return {
-                "chart_json": {"embedded_id": embedded_uuid, "native_id": dashboard_id, "internal_uuid": internal_uuid}, 
-                "chart_engine": "superset"
-            }
-        finally:
-            await client.aclose()
+        figure = viz_config.get("figure")
+        if not figure or not isinstance(figure, dict) or not figure.get("data"):
+            figure = _build_fallback_chart(analysis, df_data)
+
+        # ── Hydrate figure with full data ────────────────────────────────────
+        figure = _hydrate_traces(figure, df_data, analysis.get("columns", []))
+
+        # ── Merge premium dark-mode layout ────────────────────────────────────
+        figure["layout"] = _deep_merge(_BASE_LAYOUT, figure.get("layout") or {})
+        figure["config"] = _RESPONSIVE_CONFIG
+
+        return {
+            "chart_json": figure,
+            "chart_engine": "plotly"
+        }
 
     except Exception as e:
-        logger.error("csv_superset_failed", error=str(e))
-        return {"chart_json": None, "error": str(e)}
+        logger.error("csv_visualization_failed", error=str(e), content=content)
+        return {
+            "chart_json": _build_fallback_chart(analysis, df_data),
+            "chart_engine": "plotly",
+            "error": str(e)
+        }
 
-def _parse_json(content: str) -> Dict[str, Any]:
-    # Reuse parsing logic...
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _hydrate_traces(figure: Dict[str, Any], full_data: list, columns: list) -> Dict[str, Any]:
+    """Replace col names with actual data arrays."""
+    if not full_data or not figure.get("data"):
+        return figure
+
+    col_index: Dict[str, list] = {}
+    if full_data and isinstance(full_data[0], dict):
+        for col_name in columns:
+            col_index[col_name] = [row.get(col_name) for row in full_data]
+
+    for trace in figure["data"]:
+        t_type = trace.get("type", "")
+        for key in ["x", "y", "labels", "values", "r", "theta"]:
+            if key in trace and isinstance(trace[key], str) and trace[key] in col_index:
+                trace[key] = col_index[trace[key]]
+    
+    return figure
+
+def _build_fallback_chart(analysis: Dict[str, Any], df_data: list) -> Dict[str, Any]:
+    """Basic Bar Chart Fallback."""
+    cols = analysis.get("columns", [])
+    if len(cols) < 2 or not df_data:
+        return {"data": [], "layout": {"title": {"text": "Insufficient data"}}}
+    
+    x_col, y_col = cols[0], cols[1]
+    return {
+        "data": [{
+            "x": [r.get(x_col) for r in df_data[:20]],
+            "y": [r.get(y_col) for r in df_data[:20]],
+            "type": "bar",
+            "name": y_col
+        }],
+        "layout": {"title": {"text": f"{y_col} by {x_col}"}}
+    }
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+def _parse_json(content: Any) -> Dict[str, Any]:
+    if not isinstance(content, str) or not content.strip():
+        return {}
+    content = content.strip()
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match: return {}
+    json_str = match.group()
     try:
-        start = content.find('{')
-        end = content.rfind('}')
-        if start != -1 and end != -1:
-            return json.loads(content[start:end+1])
+        return json.loads(json_str)
     except:
-        pass
-    return {}
+        cleaned = re.sub(r",\s*([\]}])", r"\1", json_str)
+        try: return json.loads(cleaned)
+        except: return {}
