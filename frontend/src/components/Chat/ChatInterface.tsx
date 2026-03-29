@@ -197,7 +197,15 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
           ) : (
             <div className="max-w-5xl mx-auto space-y-8 pb-64">
               {Array.isArray(messages) && messages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} />
+                <MessageBubble 
+                  key={msg.id} 
+                  message={msg} 
+                  onApproveSuccess={() => {
+                    if (msg.job?.id) {
+                      startPolling(msg.job.id, msg.id, onMessageUpdate, () => {}, handleHITL);
+                    }
+                  }}
+                />
               ))}
 
               {/* ── HITL Approval Card ───────────────────────────────── */}

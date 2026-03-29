@@ -2,7 +2,7 @@
 
 Wires the complete JSON pipeline backed by MongoDB:
   data_discovery → guardrail → analysis → [reflection? retry on error]
-  → visualization → insight → recommendation → output_assembler → END
+  → visualization → insight → [verifier] → recommendation → output_assembler → END
 """
 
 from typing import Any, Literal
@@ -16,6 +16,7 @@ from app.modules.json.agents.analysis_agent import analysis_agent
 from app.modules.json.agents.reflection_agent import reflection_agent
 from app.modules.json.agents.visualization_agent import visualization_agent
 from app.modules.json.agents.insight_agent import insight_agent
+from app.modules.json.agents.verifier_agent import verifier_agent
 from app.modules.json.agents.recommendation_agent import recommendation_agent
 from app.modules.json.agents.semantic_cache_agent import save_semantic_cache
 
@@ -40,6 +41,7 @@ def build_json_graph(checkpointer: Any = None) -> Any:
     graph.add_node("reflection", reflection_agent)
     graph.add_node("visualization", visualization_agent)
     graph.add_node("insight", insight_agent)
+    graph.add_node("verifier", verifier_agent)
     graph.add_node("recommendation", recommendation_agent)
     graph.add_node("output_assembler", output_assembler)
     graph.add_node("save_cache", save_semantic_cache)
@@ -62,7 +64,8 @@ def build_json_graph(checkpointer: Any = None) -> Any:
     graph.add_edge("reflection", "analysis")
     
     graph.add_edge("visualization", "insight")
-    graph.add_edge("insight", "recommendation")
+    graph.add_edge("insight", "verifier")
+    graph.add_edge("verifier", "recommendation")
     graph.add_edge("recommendation", "output_assembler")
     graph.add_edge("output_assembler", "save_cache")
     graph.add_edge("save_cache", END)

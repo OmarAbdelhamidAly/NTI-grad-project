@@ -9,6 +9,7 @@ from app.models.analysis_result import AnalysisResult
 from app.models.metric import BusinessMetric
 from app.models.knowledge import KnowledgeBase, Document
 from app.models.policy import SystemPolicy
+from app.models.team_group import TeamGroup
 
 __all__ = [
     "Base",
@@ -21,4 +22,5 @@ __all__ = [
     "KnowledgeBase",
     "Document",
     "SystemPolicy",
+    "TeamGroup",
 ]

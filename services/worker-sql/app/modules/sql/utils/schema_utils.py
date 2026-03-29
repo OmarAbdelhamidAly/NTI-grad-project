@@ -4,6 +4,19 @@ Shared logic for generating ERDs and inferring relationships from SQL metadata.
 """
 
 from typing import Any, Dict, List, Set
+import re
+
+def _safe_name(name: str) -> str:
+    """Sanitize names to valid Mermaid identifiers (no quotes, spaces, or special chars)."""
+    import re
+    # 1. Replace non-alphanumeric with underscore
+    name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    # 2. Collapse multiple underscores and strip them from ends
+    name = re.sub(r'_+', '_', name).strip('_')
+    # 3. Ensure it doesn't start with a digit
+    if name and name[0].isdigit():
+        name = '_' + name
+    return name or "unnamed"
 
 def generate_mermaid_erd(tables: List[Dict[str, Any]], foreign_keys: List[Dict[str, Any]]) -> str:
     """Generate a Mermaid ERD string from tables and foreign keys."""
@@ -20,11 +33,14 @@ def generate_mermaid_erd(tables: List[Dict[str, Any]], foreign_keys: List[Dict[s
             return "boolean"
         return "string"
 
+
     for table in tables:
         t_name = table["table"]
-        erd_lines.append(f'    "{t_name}" {{')
+        safe_t = _safe_name(t_name)
+        erd_lines.append(f'    {safe_t} {{')
         for col in table.get("columns", []):
             col_name = col["name"]
+            safe_col = _safe_name(col_name)
             m_type = _get_mermaid_type(col["dtype"])
             pk_marker = "PK" if col.get("primary_key") else ""
             
@@ -35,19 +51,22 @@ def generate_mermaid_erd(tables: List[Dict[str, Any]], foreign_keys: List[Dict[s
             )
             fk_marker = "FK" if is_fk else ""
             
-            # Formatting line with markers
-            line = f'        {m_type} {col_name}'
-            if pk_marker or fk_marker:
-                line += f' {pk_marker}{" " if pk_marker and fk_marker else ""}{fk_marker}'
+            # Build the line with markers
+            markers = ",".join(filter(None, [pk_marker, fk_marker]))
+            if markers:
+                line = f'        {m_type} {safe_col} {markers}'
+            else:
+                line = f'        {m_type} {safe_col}'
             erd_lines.append(line)
         erd_lines.append('    }')
     
     # Relationships
     fk_set = set()
     for fk in foreign_keys:
-        # Mermaid relationship string
-        # using ||--o{ for one-to-many as a standard heuristic
-        fk_str = f'    "{fk["from_table"]}" ||--o{{ "{fk["to_table"]}" : "{fk["from_col"]}->{fk["to_col"]}"'
+        from_safe = _safe_name(fk["from_table"])
+        to_safe = _safe_name(fk["to_table"])
+        label = _safe_name(f'{fk["from_col"]}--{fk["to_col"]}')
+        fk_str = f'    {from_safe} ||--o{{ {to_safe} : {label}'
         if fk_str not in fk_set:
             erd_lines.append(fk_str)
             fk_set.add(fk_str)
@@ -119,8 +138,23 @@ def infer_foreign_keys(tables: List[Dict[str, Any]], existing_fks: List[Dict[str
                                 break
 
             # Heuristic 2: Unusual Shared Column Names (length > 8)
+            # Broad exclusion list: semantically common columns that appear across
+            # multiple tables but are NOT foreign keys
+            _COMMON_COLS = {
+                "created_at", "updated_at", "status", "description", "timestamp",
+                "last_updated", "modified_at", "deleted_at", "is_active", "is_deleted",
+                # Personal / address fields
+                "firstname", "lastname", "first_name", "last_name", "postalcode",
+                "postal_code", "zipcode", "zip_code", "birthdate", "birth_date",
+                "hiredate", "hire_date", "phone_number", "email_address",
+                # Financial / metric fields
+                "unitprice", "unit_price", "totalprice", "total_price", "quantity",
+                "discount", "tax_rate", "unit_cost", "list_price",
+                # Generic business fields
+                "company_name", "account_number", "invoice_number", "order_number",
+            }
             if len(col_name) > 8 and not col_name.endswith("id"):
-                if col_name in ("created_at", "updated_at", "status", "description", "timestamp", "last_updated"):
+                if col_name in _COMMON_COLS:
                     continue
                     
                 for t2 in tables:

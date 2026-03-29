@@ -170,6 +170,45 @@ def _build_static_metadata(hint: Optional[str] = None) -> Dict[str, Any]:
             "specialized_fields": {}
         }
 
+async def _build_dynamic_metadata_with_ai(
+    vision_llm: Any, 
+    page_descriptions: list[str], 
+    context_hint: Optional[str] = None
+) -> Dict[str, Any]:
+    """Generates a high-impact summary of the document using the collected page descriptions."""
+    
+    # Use only the first few and last few pages to keep context window safe if the doc is huge
+    content_sample = "\n---\n".join(page_descriptions[:5])
+    if len(page_descriptions) > 5:
+         content_sample += "\n... [Middle pages omitted for summary] ...\n" + "\n---\n".join(page_descriptions[-2:])
+
+    prompt = f"""You are an Expert Document Librarian. 
+    Analyze the following page-by-page visual descriptions of a document and provide a highly descriptive 1-sentence summary that highlights the document's main topic, purpose, and key entities.
+    
+    Context Hint: {context_hint or 'None'}
+    
+    Document Descriptions:
+    {content_sample}
+    
+    Respond with ONLY the 1-sentence summary. No preamble."""
+    
+    try:
+        res = await vision_llm.ainvoke(prompt)
+        summary = res.content.strip()
+    except Exception as e:
+        logger.warning(f"ai_summary_generation_failed, falling back: {str(e)}")
+        summary = f"A {len(page_descriptions)}-page document analyzed via vision."
+
+    # Get base metadata
+    base_meta = _build_static_metadata(context_hint)
+    
+    # Inject the smart summary
+    base_meta["dna"]["summary"] = summary
+    base_meta["specialized_fields"]["classification_mode"] = "ai_vision_synthesis"
+    
+    return base_meta
+
+
 
 async def indexing_agent(doc_id: str) -> Dict[str, Any]:
     """Indexes a PDF document into Qdrant using ColPali multi-vectors."""
@@ -268,9 +307,9 @@ async def indexing_agent_source(source_id: str) -> Dict[str, Any]:
             async with async_session_factory() as db2:
                 from sqlalchemy import update
                 await db2.execute(
-                    update(DataSource)
+                    sql_update(DataSource)
                     .where(DataSource.id == uuid.UUID(source_id))
-                    .values(indexing_status="failed")
+                    .values(indexing_status="failed", last_error=str(e))
                 )
                 await db2.commit()
             return {"error": str(e)}
@@ -299,13 +338,26 @@ async def _run_indexing_core(
     import asyncio
     from app.infrastructure.config import settings
     
-    # Using Gemini 3 Flash for vision since Groq completely decommissioned their free vision models today.
-    # This ensures graphs and tables are accurately captured!
-    vision_llm = ChatGoogleGenerativeAI(
-        model="gemini-3-flash", 
+    # Priority 1: OpenRouter (Fast, cheap, no limits - when funded)
+    from langchain_openai import ChatOpenAI
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    
+    primary_vision = ChatOpenAI(
+        model="google/gemini-flash-1.5", 
+        temperature=0,
+        api_key=settings.OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1"
+    )
+    
+    # Priority 2: Gemini Direct API (Free tier, slow with rate limits)
+    fallback_vision = ChatGoogleGenerativeAI(
+        model="gemini-1.5-flash-latest", 
         temperature=0,
         google_api_key=settings.GEMINI_API_KEY
     )
+    
+    # Automatically switch to Free Gemini if OpenRouter rejects (e.g. 402 Insufficient Balance)
+    vision_llm = primary_vision.with_fallbacks([fallback_vision])
     embed_model = _get_embedding_model()
     
     # 2. Collection Setup
@@ -318,6 +370,7 @@ async def _run_indexing_core(
     await qdrant.ensure_collection(text_vector_size=768) # embedding-001 is 768-dim
 
     # 3. Processing Loop
+    all_page_descriptions = []
     for current_page in range(1, total_pages + 1):
         logger.info(f"Processing PDF page {current_page} of {total_pages} (Groq Vision)...")
         
@@ -358,8 +411,10 @@ async def _run_indexing_core(
         
         prompt = "Extract all text, tables, and key visual elements from this document page. Provide a structured, searchable description. Focus on content that a user might search for."
         
-        # Respect Gemini free tier limit of ~15 Requests Per Minute (wait 4.5 seconds per page)
-        await asyncio.sleep(4.5)
+        # Safety Throttle: Because you haven't funded OpenRouter yet, it WILL fallback to Gemini Free.
+        # So we MUST keep this 8 second sleep to prevent Gemini Free from crashing with 429 Too Many Requests.
+        # You can delete this sleep line tonight after setting up OpenRouter credits!
+        await asyncio.sleep(8)
         
         message = HumanMessage(content=[
             {"type": "text", "text": prompt},
@@ -392,9 +447,15 @@ async def _run_indexing_core(
         )
         
         # Memory Cleanup
+        all_page_descriptions.append(page_description)
         gc.collect()
 
-    doc_dna = _build_static_metadata(context_hint)
+    # Create Dynamic AI Metadata
+    doc_dna = await _build_dynamic_metadata_with_ai(
+        vision_llm=vision_llm,
+        page_descriptions=all_page_descriptions,
+        context_hint=context_hint
+    )
     
     # Final update for completion
     async with async_session_factory() as db:

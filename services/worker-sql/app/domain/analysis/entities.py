@@ -68,6 +68,8 @@ class AnalysisState(TypedDict, total=False):
     # ── Visualization Agent Output ────────────────────────────
     chart_json: Annotated[Optional[Dict[str, Any]], merge_dicts]  # ECharts or Plotly figure JSON
     chart_engine: Optional[str]  # "echarts" | "plotly"
+    viz_rationale: Optional[str]  # Why this chart was chosen
+
 
     # ── Insight Agent Output ──────────────────────────────────
     insight_report: Optional[str]

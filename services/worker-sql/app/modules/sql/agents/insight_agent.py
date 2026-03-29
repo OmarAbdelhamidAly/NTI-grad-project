@@ -19,26 +19,39 @@ from app.infrastructure.llm import get_llm
 from app.domain.analysis.entities import AnalysisState
 from app.infrastructure.config import settings
 
-INSIGHT_PROMPT = """You are a senior data analyst writing insights for business stakeholders.
+INSIGHT_PROMPT = """You are a Lead Business Intelligence Strategy Consultant.
+Your goal is to transform raw data into a premium, executive-grade analytical narrative that drives decision-making.
+
+### REPORTING STYLE GUIDE
+1. **Tone**: Professional, authoritative, and strategic.
+2. **Structure**: 
+   - Use Markdown headings (`###`).
+   - Use bold text for key figures/entities.
+   - Use bullet points for readability.
+3. **Sections**:
+   - **### 📈 Strategic Analysis**: Deep dive into the data, identifying trends, outliers, or significant rankings.
+   - **### 🎯 Business Implications**: Explain what these numbers mean for the business (ROI, Risks, Opportunities).
+   - **### 🛠️ Visualization Intelligence**: Explain why the chosen chart was selected for this data (using the context provided below).
 
 ### FORMATTING RULES (STRICT)
-1. You MUST respond with ONLY a valid JSON object.
-2. The `insight_report` and `executive_summary` fields MUST contain RAW text without markdown code blocks (no ```) inside the string values.
-3. DO NOT wrap the text in curly braces {{}} or extra quotes.
-4. If there is no data, explain why clearly in the report.
+- Respond with ONLY a valid JSON object.
+- The `insight_report` and `executive_summary` fields MUST contain RAW text with Markdown formatting.
+- DO NOT use JSON-escaped quotes like \" inside the text; use single quotes ' or avoid them.
 
-### REQUIRED JSON STRUCTURE
+### INPUT DATA
+- **User Question**: {question}
+- **Analytical Intent**: {intent}
+- **Visualization Logic**: {viz_rationale}
+- **Knowledge Base Insights**: {kb_context}
+- **Data Sample**: {data}
+
+Analytical level: {complexity_instruction}
+
+JSON Structure:
 {{
-  "insight_report": "Direct analysis text here. Use bullet points or paragraphs as needed.",
-  "executive_summary": "One or two punchy sentences for a busy executive."
-}}
-
-Question: {question}
-Intent: {intent}
-Knowledge Base Context: {kb_context}
-Data: {data}
-
-{complexity_instruction}"""
+  "insight_report": "Full markdown report here...",
+  "executive_summary": "Punchy one-sentence summary for the CEO dashboard."
+}}"""
 
 
 async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
@@ -53,21 +66,15 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
 
     llm = get_llm(temperature=0.3)
 
-    # Calculate complexity instructions (Idea: Dynamic tone)
+    # Calculate complexity instructions
     idx = state.get("complexity_index", 1)
     tot = state.get("total_pills", 1)
     
-    complexity_instruction = ""
+    complexity_instruction = "Standard analysis."
     if tot > 1:
-        if idx == 1:
-            complexity_instruction = "TONE: Tactical & Foundational. Focus on the immediate facts. Keep the analysis grounded in the specific numbers provided."
-        elif idx == tot:
-            complexity_instruction = f"TONE: Strategic & Executive. This is the master insight (level {idx}). Provide a high-level summary that synthesizes the implications for the business. Focus on ROI, growth, or risk."
-        else:
-            complexity_instruction = f"TONE: Investigative & Advanced. Dig into the 'why'. Look for second-order effects or trends that are not immediately obvious at first glance."
+        complexity_instruction = f"This is part {idx} of {tot}. Maintain consistency with previous steps."
 
     def _sanitize_question(q: str) -> str:
-        """Extract text from JSON questions if they have history."""
         try:
             parsed = json.loads(q)
             if isinstance(parsed, dict) and "text" in parsed:
@@ -76,11 +83,10 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
             pass
         return q
 
-    clean_question = _sanitize_question(state.get("question") or "")
-
     prompt = INSIGHT_PROMPT.format(
-        question=clean_question,
+        question=_sanitize_question(state.get("question") or ""),
         intent=state.get("intent") or "comparison",
+        viz_rationale=state.get("viz_rationale") or "Standard automated selection.",
         kb_context=analysis.get("kb_context") or "None provided.",
         data=json.dumps(analysis.get("data", [])[:20], indent=2, default=str),
         complexity_instruction=complexity_instruction
@@ -91,18 +97,14 @@ async def insight_agent(state: AnalysisState) -> Dict[str, Any]:
         content = response.content
         parsed = _parse_json(content)
 
-        if not parsed:
-            logger.warning("insight_parsing_empty", content=content)
-            raise ValueError("Parsed insight JSON is empty")
-
         return {
             "insight_report": parsed.get("insight_report", "Analysis completed."),
             "executive_summary": parsed.get("executive_summary", "See detailed report."),
         }
     except Exception as e:
-        logger.error("insight_generation_failed", error=str(e), content=content if 'content' in locals() else None)
+        logger.error("insight_generation_failed", error=str(e))
         return {
-            "insight_report": f"Analysis was performed but insight generation encountered an error: {str(e)[:100]}",
+            "insight_report": f"Analysis complete. (Insight generation error: {str(e)[:50]})",
             "executive_summary": "Results are available in chart form.",
         }
 

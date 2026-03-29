@@ -163,6 +163,7 @@ async def _execute_pillar(job_id: str) -> dict:
                       job_id=job.id,
                       chart_json=res_data.get("chart_json"),
                       chart_engine=res_data.get("chart_engine", "echarts"),
+                      viz_rationale=res_data.get("viz_rationale"),
                       insight_report=res_data.get("insight_report"),
                       exec_summary=res_data.get("executive_summary"),
                       recommendations_json=res_data.get("recommendations"),
@@ -173,6 +174,7 @@ async def _execute_pillar(job_id: str) -> dict:
                       set_={
                           'chart_json': stmt.excluded.chart_json,
                           'chart_engine': stmt.excluded.chart_engine,
+                          'viz_rationale': stmt.excluded.viz_rationale,
                           'insight_report': stmt.excluded.insight_report,
                           'exec_summary': stmt.excluded.exec_summary,
                           'recommendations_json': stmt.excluded.recommendations_json,
@@ -221,7 +223,34 @@ async def _execute_pillar(job_id: str) -> dict:
             from app.modules.sql.tools.run_sql_query import dispose_all_engines
             await engine.dispose()
             await dispose_all_engines()
-            await redis_client.aclose()
+            
+            if 'redis_client' in locals():
+                await redis_client.aclose()
+
+            # ── Decisive httpx Cleanup ──
+            # Search for any httpx.AsyncClient instances that might be leaked by agents
+            # and close them within the current loop.
+            import gc
+            for obj in gc.get_objects():
+                try:
+                    import httpx
+                    if isinstance(obj, httpx.AsyncClient) and not obj.is_closed:
+                        logger.info("force_closing_leaked_httpx_client", client_id=id(obj))
+                        await obj.aclose()
+                except (Exception, ImportError):
+                    continue
+
+        except Exception as e:
+            logger.warning("cleanup_error", error=str(e))
+        
+        # ── Final Task Cleanup ──
+        # Ensure all pending tasks (like close-wait) are completed or cancelled
+        try:
+            pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if pending:
+                logger.info("cancelling_pending_tasks", count=len(pending))
+                for task in pending: task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         except Exception:
             pass
 

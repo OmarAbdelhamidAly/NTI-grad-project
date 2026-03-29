@@ -13,7 +13,7 @@ from app.infrastructure.config import settings
 INTAKE_PROMPT = """You are an intake analyst for a data analysis platform.
 
 Given a user's question, a data source schema, and a dictionary of business metrics, determine:
-1. **intent**: One of: trend, comparison, ranking, correlation, anomaly
+1. **intent**: One of: trend, comparison, ranking, correlation, anomaly, kpi, proportion
 2. **relevant_columns**: List of column names from the schema that are relevant
 3. **time_range**: If temporal, specify the range (e.g., "last 2 years"), else null
 4. **clarification_needed**: If the question is ambiguous, ask for clarification, else null

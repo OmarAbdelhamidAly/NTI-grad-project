@@ -10,11 +10,13 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 interface Props {
   message: Message;
+  onApproveSuccess?: (jobId: string) => void;
 }
 
-export default function MessageBubble({ message }: Props) {
+export default function MessageBubble({ message, onApproveSuccess }: Props) {
   const isUser = message.role === 'user';
   const [isApproving, setIsApproving] = useState(false);
+  const [isApproved, setIsApproved] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
@@ -23,6 +25,10 @@ export default function MessageBubble({ message }: Props) {
     setIsApproving(true);
     try {
       await AnalysisAPI.approveJob(message.job.id);
+      setIsApproved(true);
+      if (onApproveSuccess) {
+        onApproveSuccess(message.job.id);
+      }
     } catch (e) {
       console.error('Approval failed', e);
     } finally {
@@ -92,7 +98,7 @@ export default function MessageBubble({ message }: Props) {
             )}
 
             {/* ── 2. Awaiting Approval ──────────────────────────────── */}
-            {message.job?.status === 'awaiting_approval' && (
+            {message.job?.status === 'awaiting_approval' && !isApproved && (
               <div className="border border-amber-500/30 bg-amber-500/5 rounded-2xl overflow-hidden animate-in fade-in zoom-in duration-500">
                 <div className="p-4 bg-amber-500/10 flex items-center gap-3 border-b border-amber-500/20">
                   <ShieldAlert className="w-5 h-5 text-amber-500" />
@@ -121,6 +127,16 @@ export default function MessageBubble({ message }: Props) {
                   </button>
                 </div>
               </div>
+            )}
+
+            {isApproved && (
+               <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 flex items-center gap-3 animate-in fade-in zoom-in">
+                  <CheckCircle2 className="w-5 h-5" />
+                  <div>
+                    <p className="font-black uppercase text-xs tracking-widest">Authorization Granted</p>
+                    <p className="text-xs font-medium opacity-80">Resuming analytical execution...</p>
+                  </div>
+               </div>
             )}
 
             {/* ── 3. Error ──────────────────────────────────────────── */}

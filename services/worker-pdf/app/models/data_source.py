@@ -52,7 +52,9 @@ class DataSource(Base):
         String(30), nullable=True
     )  # LLM-detected domain: "sales"|"hr"|"finance"|"inventory"|"customer"|"mixed"
     context_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # User-provided hint
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # Last indexing error
     created_at: Mapped[datetime] = mapped_column(
+
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 

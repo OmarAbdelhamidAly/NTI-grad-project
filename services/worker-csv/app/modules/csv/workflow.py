@@ -26,12 +26,10 @@ from app.modules.csv.agents.recommendation_agent import recommendation_agent
 from app.modules.csv.agents.reflection_agent import reflection_agent
 from app.modules.csv.agents.guardrail_agent import guardrail_agent
 from app.modules.csv.agents.semantic_cache_agent import save_semantic_cache
+from app.modules.csv.agents.verifier_agent import verifier_agent
 
 
 # ── Conditional Edge Functions ─────────────────────────────────────────────────
-
-# Governance has been moved to a separate microservice layer.
-
 
 def needs_cleaning(state: AnalysisState) -> Literal["clean", "analyze"]:
     """Route to cleaning if data quality is below 0.9."""
@@ -57,10 +55,7 @@ def check_analysis_result(state: AnalysisState) -> Literal["reflection", "visual
 # ── Build the Graph ────────────────────────────────────────────────────────────
 
 def build_csv_graph(checkpointer: Any = None) -> Any:
-    """Construct and compile the CSV LangGraph analysis pipeline.
-
-    CSV-specific flow includes a data cleaning step (skipped for SQL).
-    """
+    """Construct and compile the CSV LangGraph analysis pipeline."""
     graph = StateGraph(AnalysisState)
 
     # Add nodes
@@ -71,14 +66,13 @@ def build_csv_graph(checkpointer: Any = None) -> Any:
     graph.add_node("reflection", reflection_agent)
     graph.add_node("visualization", visualization_agent)
     graph.add_node("insight", insight_agent)
+    graph.add_node("verifier", verifier_agent)
     graph.add_node("recommendation", recommendation_agent)
     graph.add_node("output_assembler", output_assembler)
     graph.add_node("save_cache", save_semantic_cache)
 
     # Entry point is Discovery
     graph.set_entry_point("data_discovery")
-
-    # Logic moved to governance layer
 
     # data_discovery → conditional: clean or analyze
     graph.add_conditional_edges(
@@ -107,9 +101,10 @@ def build_csv_graph(checkpointer: Any = None) -> Any:
     # reflection → analysis (retry loop)
     graph.add_edge("reflection", "analysis")
 
-    # visualization → insight → recommendation → output_assembler → END
+    # visualization → insight → verifier → recommendation → output_assembler → END
     graph.add_edge("visualization", "insight")
-    graph.add_edge("insight", "recommendation")
+    graph.add_edge("insight", "verifier")
+    graph.add_edge("verifier", "recommendation")
     graph.add_edge("recommendation", "output_assembler")
     graph.add_edge("output_assembler", "save_cache")
     graph.add_edge("save_cache", END)

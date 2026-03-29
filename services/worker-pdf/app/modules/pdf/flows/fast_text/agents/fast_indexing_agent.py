@@ -141,4 +141,11 @@ async def fast_indexing_agent(source_id: str) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error("fast_indexing_failed", source_id=source_id, error=str(e))
+        async with async_session_factory() as db:
+            await db.execute(
+                update(DataSource)
+                .where(DataSource.id == uuid.UUID(source_id))
+                .values(indexing_status="failed", last_error=str(e))
+            )
+            await db.commit()
         return {"error": str(e), "status": "failed"}

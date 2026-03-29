@@ -37,7 +37,8 @@ export function useAnalysisPolling() {
 
         if (isDone || isError || isAwaitingApproval) {
           clearInterval(pollInterval);
-          
+          setIsProcessing(false);
+
           if (isDone) {
             try {
               const result = await AnalysisAPI.getJobResult(jobId);
@@ -47,15 +48,16 @@ export function useAnalysisPolling() {
               });
             } catch (resErr) {
               console.error("Result fetch failed", resErr);
+              onUpdate(systemMessageId, { job: jobData, isStreaming: false });
             }
-          }
-
-          if (isAwaitingApproval && onHITL) {
+          } else if (isAwaitingApproval && onHITL) {
             onUpdate(systemMessageId, { job: jobData, isStreaming: false });
             onHITL(jobId, jobData);
+          } else {
+            // error state
+            onUpdate(systemMessageId, { job: jobData, isStreaming: false });
           }
 
-          setIsProcessing(false);
           onComplete();
         }
       } catch (err) {

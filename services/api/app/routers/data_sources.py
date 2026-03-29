@@ -85,16 +85,30 @@ def _profile_sqlite(file_path: str) -> dict[str, Any]:
                     "dtype": str(col["type"]),
                     "nullable": col.get("nullable", True),
                     "primary_key": col["name"] in pk_cols,
+                    "null_count": 0,
+                    "unique_count": 0,
+                    "sample_values": []
                 }
-                # Sample values logic...
+                col_name_q = col["name"]
                 try:
                     with engine.connect() as conn:
+                        # unique count
+                        unique_res = conn.execute(
+                            text(f'SELECT COUNT(DISTINCT "{col_name_q}") FROM "{table_name}"')
+                        ).scalar()
+                        col_info["unique_count"] = int(unique_res or 0)
+                        # null count
+                        null_res = conn.execute(
+                            text(f'SELECT COUNT(*) FROM "{table_name}" WHERE "{col_name_q}" IS NULL')
+                        ).scalar()
+                        col_info["null_count"] = int(null_res or 0)
+                        # sample values
                         rows = conn.execute(
-                            text(f'SELECT "{col["name"]}" FROM "{table_name}" WHERE "{col["name"]}" IS NOT NULL LIMIT 3')
+                            text(f'SELECT "{col_name_q}" FROM "{table_name}" WHERE "{col_name_q}" IS NOT NULL LIMIT 5')
                         ).fetchall()
-                    col_info["sample_values"] = [str(r[0]) for r in rows]
+                        col_info["sample_values"] = [str(r[0]) for r in rows]
                 except Exception:
-                    col_info["sample_values"] = []
+                    pass
                 col_infos.append(col_info)
 
             # Row count...
@@ -133,8 +147,8 @@ def _profile_sqlite(file_path: str) -> dict[str, Any]:
                 {
                     "name": f"{t['table']}.{c['name']}",
                     "dtype": c["dtype"],
-                    "null_count": 0, # Placeholder
-                    "unique_count": 0, # Placeholder
+                    "null_count": c.get("null_count", 0),
+                    "unique_count": c.get("unique_count", 0),
                     "sample_values": c.get("sample_values", [])
                 }
                 for t in result_tables

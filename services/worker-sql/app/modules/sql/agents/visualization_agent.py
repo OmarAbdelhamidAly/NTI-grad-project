@@ -1,14 +1,33 @@
 """SQL Pipeline — Visualization Agent.
 
-Generates premium Plotly.js Figure configurations dynamically via LLM.
+Generates premium Plotly.js Figure configurations dynamically via LLM,
+with deterministic pre-analysis, strict validation, and robust hydration.
+
+Decision flow:
+    1. _profile_data()        → derive cardinality, dtypes, shape
+    2. _select_chart_type()   → deterministic rule-engine (no LLM guessing)
+    3. LLM call               → only generates layout + aesthetic config
+    4. _validate_figure()     → hard reject bad traces before merge
+    5. _hydrate_traces()      → replace stubs with full data
+    6. _merge_layout()        → inject dark-mode tokens
+
+FIX LOG (v2):
+    - [FIX-1] Pie/Donut: تشتغل على proportion intent بغض النظر عن row_count
+    - [FIX-2] Treemap: تتفعل لما categories > 7 في proportion context
+                       + لما cardinality > 10 في categorical comparison
+    - [FIX-3] Horizontal Bar: تتفعل لما labels طويلة (avg > 8 chars) أو categories > 8
+    - [FIX-4] Dot Plot: تتفعل لما range ضيق (coefficient of variation < 0.05)
+    - [FIX-5] Title bug: الـ LLM prompt بيتبعت مع السؤال الصح دايماً (كان موجود في state)
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import structlog
-from typing import Any, Dict
+from datetime import date, datetime
+from typing import Any
 
 logger = structlog.get_logger(__name__)
 
@@ -16,186 +35,88 @@ from app.infrastructure.llm import get_llm
 from app.domain.analysis.entities import AnalysisState
 
 # ── Design Token Constants ────────────────────────────────────────────────────
-_COLORWAY = ["#6366f1", "#10b981", "#f43f5e", "#fbbf24", "#8b5cf6", "#06b6d4"]
+_COLORWAY    = ["#6366f1", "#10b981", "#f43f5e", "#fbbf24", "#8b5cf6", "#06b6d4"]
 _FONT_FAMILY = '"Inter", "system-ui", sans-serif'
-_FONT_COLOR = "#f8fafc"
-_GRID_COLOR = "rgba(255,255,255,0.05)"
+_FONT_COLOR  = "#f8fafc"
+_GRID_COLOR  = "rgba(255,255,255,0.05)"
 _TRANSPARENT = "rgba(0,0,0,0)"
 
-# ── LLM Prompt ────────────────────────────────────────────────────────────────
-PLOTLY_VIZ_PROMPT = """You are a Principal Data Scientist and Visualization Architect specializing in Plotly.js.
-Your task is to design a premium, insight-driven Plotly Figure JSON configuration for a dark-mode analytics dashboard.
+# ── Chart-type registry ───────────────────────────────────────────────────────
+_CHART_RULES: list[tuple[str, str]] = [
+    ("indicator",  "Single numeric KPI — number indicator is clearest"),
+    ("scatter",    "Time-series or date x-axis — line chart shows trend"),
+    ("pie",        "Part-to-whole with 2–7 categories — donut shows proportion"),
+    ("treemap",    "Part-to-whole with 8+ categories — treemap avoids label clutter"),
+    ("dot_plot",   "Narrow numeric range — dot plot avoids exaggerating differences"),
+    ("h_bar",      "Long category labels or many categories — horizontal bar"),
+    ("bar",        "Categorical comparison — bar chart ranks discrete groups"),
+    ("histogram",  "Single numeric column distribution"),
+    ("scatter",    "Two numeric columns — scatter shows correlation"),
+    ("table",      "Fallback: no better visual encoding available"),
+]
 
----
-### CHART SELECTION HEURISTICS
-Choose the SINGLE most statistically powerful chart type from the rules below:
+# ── LLM Prompt (layout-only; chart type is pre-decided) ───────────────────────
+_LAYOUT_PROMPT = """\
+You are a Plotly.js visualization expert working on a dark-mode analytics dashboard.
 
-| Scenario                                    | Plotly Trace Type         | Notes                                      |
-|---------------------------------------------|---------------------------|--------------------------------------------|
-| Time-series or sequential trends            | scatter (mode="lines")    | Use x_col = date/time column               |
-| Categorical comparisons (3–12 categories)   | bar                       | orientation="v" by default                 |
-| Single total or executive KPI               | indicator                 | Use mode="number" or "number+delta"        |
-| Part-to-whole / proportions (≤ 7 segments)  | pie                       | Add hole=0.45 for a modern donut style     |
-| Hierarchical / nested categories            | treemap                   | Use labels + parents + values              |
-| Correlation between 3 numeric metrics       | scatter (with marker.size)| Bubble chart variant                       |
-| Multi-metric entity profiling               | scatterpolar              | Radar / spider chart                       |
-| Distribution of a numeric column            | histogram                 | Use nbinsx=20                              |
-| Raw data / last resort                      | table                     | Use only if no chart fits                  |
+The chart type has already been decided: **{chart_type}**
+Do NOT change it.
 
----
-### STRICT OUTPUT FORMAT
-You MUST return a single, valid JSON object with exactly two keys:
+Your only job is to return a JSON object with:
+1. "title"   — A high-impact, business-focused title (e.g., "Market Dominance" instead of "Sales by Category").
+2. "x_label" — A clean, human-readable label for the X axis.
+3. "y_label" — A clean, human-readable label for the Y axis.
+4. "rationale" — A professional, consultant-grade explanation of why this chart type is optimal for this data.
 
-1. `"should_visualize"` (boolean): `true` if a chart meaningfully enhances understanding.
-   Set to `false` ONLY for trivial results (single row, schema description, 2-item list).
+Rules:
+- Return ONLY valid JSON. No markdown. No preamble.
+- "title" must describe the insight, not repeat the question.
+- The title MUST reflect the actual question being answered. Do not reuse titles from previous questions.
 
-2. `"figure"` (object): A complete Plotly Figure with `"data"` and `"layout"` keys.
-   - `"data"`: Array of one or more trace objects.
-   - `"layout"`: Axis labels, title, and cosmetic keys (do NOT include colors — those are injected server-side).
+Context:
+  Intent      : {intent}
+  Question    : {question}
+  Chart type  : {chart_type}
+  Columns     : {columns}
+  Row count   : {row_count}
+  Data sample : {data_sample}
 
----
-### TRACE CONSTRUCTION RULES
-- ALL column values used in traces MUST come verbatim from the `Schema/Columns` list below. Never invent column names.
-- For `bar` / `scatter` traces, set `"x"` and `"y"` to the *arrays of values* extracted from the data sample.
-- For `pie` traces, set `"labels"` and `"values"` to the corresponding arrays.
-- For `indicator`, set `"value"` to the single numeric result.
-- For `treemap`, provide `"labels"`, `"parents"`, and `"values"` arrays.
-- Keep `"name"` on each trace equal to the column or category it represents.
-
----
-### LAYOUT RULES
-- Set `"title.text"` to a concise, insightful chart title (not the raw question).
-- Set axis `"title.text"` to human-readable column labels.
-- Do NOT set colors, fonts, paper_bgcolor, plot_bgcolor — those are injected by the server.
-
----
-### EXAMPLES
-
-**Example A — Bar Chart**
-```json
-{{
-  "should_visualize": true,
-  "figure": {{
-    "data": [
-      {{
-        "type": "bar",
-        "name": "Revenue",
-        "x": ["North", "South", "East", "West"],
-        "y": [120000, 95000, 143000, 87000]
-      }}
-    ],
-    "layout": {{
-      "title": {{"text": "Revenue by Region"}},
-      "xaxis": {{"title": {{"text": "Region"}}}},
-      "yaxis": {{"title": {{"text": "Revenue (USD)"}}}}
-    }}
-  }}
-}}
-```
-
-**Example B — Donut Pie**
-```json
-{{
-  "should_visualize": true,
-  "figure": {{
-    "data": [
-      {{
-        "type": "pie",
-        "labels": ["Electronics", "Apparel", "Food", "Books"],
-        "values": [45, 25, 20, 10],
-        "hole": 0.45
-      }}
-    ],
-    "layout": {{
-      "title": {{"text": "Sales Share by Category"}}
-    }}
-  }}
-}}
-```
-
-**Example C — KPI Indicator**
-```json
-{{
-  "should_visualize": true,
-  "figure": {{
-    "data": [
-      {{
-        "type": "indicator",
-        "mode": "number",
-        "value": 4821053,
-        "title": {{"text": "Total Orders"}}
-      }}
-    ],
-    "layout": {{
-      "title": {{"text": "Total Orders (All Time)"}}
-    }}
-  }}
-}}
-```
-
-**Example D — No Chart**
-```json
-{{
-  "should_visualize": false,
-  "figure": null
-}}
-```
-
----
-### INPUT CONTEXT
-
-**Intent**: {intent}
-**User Question**: {question}
-**SQL Query**:
-```sql
-{sql}
-```
-**Schema / Columns**: {columns}
-**Data Sample** (up to 10 rows):
-```json
-{data}
-```
-
----
-Return ONLY a valid JSON object. NO markdown fences. NO explanation. NO preamble.
+Return exactly:
+{{"title": "...", "x_label": "...", "y_label": "...", "rationale": "..."}}
 """
 
-# ── Premium Dark-Mode Layout Defaults ─────────────────────────────────────────
-_BASE_LAYOUT: Dict[str, Any] = {
+# ── Premium Dark-Mode Layout ──────────────────────────────────────────────────
+_BASE_LAYOUT: dict[str, Any] = {
     "paper_bgcolor": _TRANSPARENT,
-    "plot_bgcolor": _TRANSPARENT,
-    "font": {
-        "family": _FONT_FAMILY,
-        "color": _FONT_COLOR,
-        "size": 13,
-    },
+    "plot_bgcolor":  _TRANSPARENT,
+    "font": {"family": _FONT_FAMILY, "color": _FONT_COLOR, "size": 13},
     "colorway": _COLORWAY,
     "hovermode": "x unified",
     "hoverlabel": {
-        "bgcolor": "rgba(15,15,30,0.9)",
+        "bgcolor":     "rgba(15,15,30,0.9)",
         "bordercolor": "rgba(255,255,255,0.15)",
         "font": {"family": _FONT_FAMILY, "color": _FONT_COLOR, "size": 12},
     },
     "legend": {
-        "bgcolor": "rgba(255,255,255,0.04)",
+        "bgcolor":     "rgba(255,255,255,0.04)",
         "bordercolor": "rgba(255,255,255,0.08)",
         "borderwidth": 1,
         "font": {"color": _FONT_COLOR},
     },
     "margin": {"l": 60, "r": 30, "t": 60, "b": 60},
     "xaxis": {
-        "gridcolor": _GRID_COLOR,
-        "linecolor": "rgba(255,255,255,0.1)",
-        "tickfont": {"color": _FONT_COLOR},
-        "title": {"font": {"color": _FONT_COLOR}},
-        "zerolinecolor": "rgba(255,255,255,0.08)",
+        "gridcolor":    _GRID_COLOR,
+        "linecolor":    "rgba(255,255,255,0.1)",
+        "tickfont":     {"color": _FONT_COLOR},
+        "title":        {"font": {"color": _FONT_COLOR}},
+        "zerolinecolor":"rgba(255,255,255,0.08)",
     },
     "yaxis": {
-        "gridcolor": _GRID_COLOR,
-        "linecolor": "rgba(255,255,255,0.1)",
-        "tickfont": {"color": _FONT_COLOR},
-        "title": {"font": {"color": _FONT_COLOR}},
-        "zerolinecolor": "rgba(255,255,255,0.08)",
+        "gridcolor":    _GRID_COLOR,
+        "linecolor":    "rgba(255,255,255,0.1)",
+        "tickfont":     {"color": _FONT_COLOR},
+        "title":        {"font": {"color": _FONT_COLOR}},
+        "zerolinecolor":"rgba(255,255,255,0.08)",
     },
     "title": {
         "font": {"family": _FONT_FAMILY, "color": _FONT_COLOR, "size": 18},
@@ -204,90 +125,608 @@ _BASE_LAYOUT: Dict[str, Any] = {
     },
 }
 
-_RESPONSIVE_CONFIG: Dict[str, Any] = {"responsive": True, "displayModeBar": False}
+_RESPONSIVE_CONFIG: dict[str, Any] = {"responsive": True, "displayModeBar": False}
 
 
-# ── Main Agent ─────────────────────────────────────────────────────────────────
-async def visualization_agent(state: AnalysisState) -> Dict[str, Any]:
-    """Analyze SQL results via LLM and return a premium Plotly Figure JSON."""
+# ═════════════════════════════════════════════════════════════════════════════
+# Public agent entry-point
+# ═════════════════════════════════════════════════════════════════════════════
 
+async def visualization_agent(state: AnalysisState) -> dict[str, Any]:
+    """
+    Analyse SQL results, decide chart type deterministically, then call
+    LLM only for layout labels. Returns a fully-hydrated Plotly figure.
+    """
     analysis = state.get("analysis_results") or {}
-    if not analysis or not analysis.get("data"):
+    raw_data: list = analysis.get("data") or []
+    columns:  list = analysis.get("columns") or []
+
+    if not raw_data or not columns:
         logger.warning("visualization_no_data", state_keys=list(state.keys()))
-        return {
-            "chart_json": None,
-            "chart_engine": "plotly",
-            "error": "No data available for visualization",
-        }
+        return _no_chart("No data available for visualization")
 
-    llm = get_llm(temperature=0)
+    # ── 1. Profile the data ───────────────────────────────────────────────────
+    profile = _profile_data(raw_data, columns)
+    logger.info("data_profile", job_id=state.get("job_id"), **{
+        k: v for k, v in profile.items() if k != "rows"
+    })
 
-    raw_data: list = analysis["data"]
-    data_sample = raw_data[:50]  # Use up to 50 rows for trace construction
-    prompt_sample = raw_data[:10]  # Smaller sample for the prompt context
-
-    clean_question = _sanitize_question(state.get("question", ""))
-
-    prompt = PLOTLY_VIZ_PROMPT.format(
+    # ── 2. Decide chart type deterministically ────────────────────────────────
+    chart_type, rule_reason = _select_chart_type(
+        profile=profile,
         intent=state.get("intent", "comparison"),
-        question=clean_question,
-        sql=state.get("generated_sql", ""),
-        columns=json.dumps(analysis.get("columns", [])),
-        data=json.dumps(prompt_sample, indent=2, default=str),
+        row_count=len(raw_data),
     )
 
-    content: str | None = None
+    # ── 3. Skip visualization for trivial data ────────────────────────────────
+    if chart_type == "skip":
+        logger.info("visualization_skipped", reason=rule_reason, job_id=state.get("job_id"))
+        return _no_chart(None)
+
+    # ── 4. Ask LLM only for labels / title ───────────────────────────────────
+    # [FIX-5] بنبعت السؤال الصح دايماً من state مباشرة
+    layout_meta = await _fetch_layout_meta(
+        chart_type=chart_type,
+        intent=state.get("intent", "comparison"),
+        question=_sanitize_question(state.get("question", "")),
+        columns=columns,
+        row_count=len(raw_data),
+        data_sample=raw_data[:10],
+    )
+
+    # ── 5. Build figure from deterministic chart type + full data ─────────────
+    figure = _build_figure(
+        chart_type=chart_type,
+        raw_data=raw_data[:50],
+        columns=columns,
+        profile=profile,
+        layout_meta=layout_meta,
+    )
+
+    # ── 6. Validate figure before sending ────────────────────────────────────
+    validation_error = _validate_figure(figure)
+    if validation_error:
+        logger.warning(
+            "figure_validation_failed",
+            reason=validation_error,
+            job_id=state.get("job_id"),
+        )
+        figure = _build_fallback_table(analysis)
+
+    # ── 7. Merge dark-mode layout ─────────────────────────────────────────────
+    figure["layout"] = _deep_merge(_BASE_LAYOUT, figure.get("layout") or {})
+    figure["config"] = _RESPONSIVE_CONFIG
+
+    rationale = layout_meta.get("rationale") or rule_reason
+    logger.info(
+        "plotly_figure_built",
+        job_id=state.get("job_id"),
+        chart_type=chart_type,
+        trace_count=len(figure["data"]),
+        rationale=rationale,
+    )
+    return {"chart_json": figure, "chart_engine": "plotly", "viz_rationale": rationale}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 1 — Data Profiling
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _profile_data(raw_data: list, columns: list) -> dict[str, Any]:
+    """
+    Derive column-level statistics needed for deterministic chart selection.
+
+    Returns:
+        col_types      : {col_name: "numeric" | "temporal" | "categorical"}
+        cardinalities  : {col_name: int}
+        numeric_cols   : [col_name, ...]
+        temporal_cols  : [col_name, ...]
+        cat_cols       : [col_name, ...]
+        n_cols         : int
+        n_rows         : int
+        numeric_range  : {col_name: {"min": float, "max": float, "cv": float}}
+        avg_label_len  : float   — avg char length of categorical values
+    """
+    rows: list[dict] = _normalise_rows(raw_data, columns)
+
+    col_types: dict[str, str]     = {}
+    cardinalities: dict[str, int] = {}
+    # [FIX-3, FIX-4] إضافة range stats و label length
+    numeric_range: dict[str, dict] = {}
+
+    for col in columns:
+        values = [r.get(col) for r in rows if r.get(col) is not None]
+        unique_vals = set(str(v) for v in values)
+        cardinalities[col] = len(unique_vals)
+
+        if _is_temporal_col(col, values):
+            col_types[col] = "temporal"
+        elif _is_numeric_col(values):
+            col_types[col] = "numeric"
+            # [FIX-4] احسب range statistics للـ numeric columns
+            floats = [_coerce_float(v) for v in values]
+            floats = [f for f in floats if f is not None]
+            if floats:
+                mn, mx = min(floats), max(floats)
+                mean   = sum(floats) / len(floats)
+                # Coefficient of Variation = std/mean — لو صغير → range ضيق
+                variance = sum((f - mean) ** 2 for f in floats) / len(floats)
+                std      = math.sqrt(variance)
+                cv       = (std / mean) if mean != 0 else 0
+                numeric_range[col] = {"min": mn, "max": mx, "cv": cv, "mean": mean}
+        else:
+            col_types[col] = "categorical"
+
+    numeric_cols  = [c for c, t in col_types.items() if t == "numeric"]
+    temporal_cols = [c for c, t in col_types.items() if t == "temporal"]
+    cat_cols      = [c for c, t in col_types.items() if t == "categorical"]
+
+    # [FIX-3] احسب متوسط طول الـ labels للـ categorical columns
+    avg_label_len = 0.0
+    if cat_cols:
+        all_labels = []
+        for col in cat_cols:
+            all_labels.extend(str(r.get(col, "")) for r in rows if r.get(col) is not None)
+        avg_label_len = sum(len(l) for l in all_labels) / len(all_labels) if all_labels else 0.0
+
+    return {
+        "col_types":     col_types,
+        "cardinalities": cardinalities,
+        "numeric_cols":  numeric_cols,
+        "temporal_cols": temporal_cols,
+        "cat_cols":      cat_cols,
+        "n_cols":        len(columns),
+        "n_rows":        len(rows),
+        "rows":          rows,
+        "numeric_range": numeric_range,       # [FIX-4]
+        "avg_label_len": avg_label_len,       # [FIX-3]
+    }
+
+
+def _normalise_rows(raw_data: list, columns: list) -> list[dict]:
+    if not raw_data:
+        return []
+    if isinstance(raw_data[0], dict):
+        return raw_data
+    return [
+        {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+        for row in raw_data
+    ]
+
+
+def _is_numeric_col(values: list) -> bool:
+    if not values:
+        return False
+    numeric_count = sum(1 for v in values if _coerce_float(v) is not None)
+    return numeric_count / len(values) >= 0.85
+
+
+def _is_temporal_col(col_name: str, values: list) -> bool:
+    temporal_keywords = ("date", "time", "year", "month", "day", "week", "period", "ts", "at")
+    if any(kw in col_name.lower() for kw in temporal_keywords):
+        return True
+    if not values:
+        return False
+    sample  = values[:10]
+    parsed  = sum(1 for v in sample if _coerce_datetime(v) is not None)
+    return parsed / len(sample) >= 0.7
+
+
+def _coerce_float(v: Any) -> float | None:
+    try:
+        f = float(v)
+        return None if math.isnan(f) or math.isinf(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_datetime(v: Any) -> datetime | None:
+    if isinstance(v, (datetime, date)):
+        return v if isinstance(v, datetime) else datetime(v.year, v.month, v.day)
+    if not isinstance(v, str):
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d", "%d/%m/%Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(v[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 2 — Deterministic Chart Selection  (الجزء الرئيسي للـ Fix)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _select_chart_type(
+    profile: dict[str, Any],
+    intent: str,
+    row_count: int,
+) -> tuple[str, str]:
+    """
+    Rule-engine that selects chart type from data shape — NOT from LLM.
+
+    Priority order (من الأكثر specificity للأقل):
+      1. Guard: no data / single KPI
+      2. KPI intent override
+      3. Time-series
+      4. Distribution
+      5. Proportion/Composition  → pie (≤7) or treemap (>7)   [FIX-1, FIX-2]
+      6. Narrow numeric range    → dot_plot                    [FIX-4]
+      7. Categorical comparison  → h_bar or bar                [FIX-2, FIX-3]
+      8. Two numeric             → scatter
+      9. Fallback                → table
+    """
+    n_cols        = profile["n_cols"]
+    numeric_cols  = profile["numeric_cols"]
+    temporal_cols = profile["temporal_cols"]
+    cat_cols      = profile["cat_cols"]
+    cardinalities = profile["cardinalities"]
+    numeric_range = profile.get("numeric_range", {})
+    avg_label_len = profile.get("avg_label_len", 0.0)
+
+    # ── Guard: trivially small data ──────────────────────────────────────────
+    if row_count == 0:
+        return "skip", "No rows to visualise"
+
+    if row_count == 1 and len(numeric_cols) == 1:
+        return "indicator", "Single numeric result — KPI indicator"
+
+    # ── KPI intent override ───────────────────────────────────────────────────
+    if intent == "kpi" and len(numeric_cols) >= 1 and row_count == 1:
+        return "indicator", "Strategic KPI — Single-metric focus"
+
+    # ── Time-series ───────────────────────────────────────────────────────────
+    if temporal_cols and numeric_cols:
+        return "scatter", (
+            f"Temporal column '{temporal_cols[0]}' + numeric '{numeric_cols[0]}' → line chart"
+        )
+
+    # ── Distribution ─────────────────────────────────────────────────────────
+    if intent == "distribution" and len(numeric_cols) == 1 and n_cols == 1:
+        return "histogram", f"Distribution of '{numeric_cols[0]}'"
+
+    # ── [FIX-1 + FIX-2] Part-to-whole / Proportions ──────────────────────────
+    # المشكلة القديمة: الـ rule كانت بتحتاج row_count <= 7 حتى بدون proportion intent
+    # الـ Fix: لو intent == proportion → مباشرة pie أو treemap بناءً على cardinality بس
+    if intent in ("proportion", "composition"):
+        cat_col  = cat_cols[0] if cat_cols else None
+        n_unique = cardinalities.get(cat_col, row_count) if cat_col else row_count
+        if n_unique <= 7:
+            return "pie", f"Proportion intent + {n_unique} categories → donut chart"
+        else:
+            return "treemap", f"Proportion intent + {n_unique} categories → treemap (avoids label clutter)"
+
+    # تاني حالة proportion: 1 cat + 1 numeric و row_count صغير (بدون explicit intent)
+    if len(cat_cols) == 1 and len(numeric_cols) == 1 and 2 <= row_count <= 7:
+        cat_col  = cat_cols[0]
+        n_unique = cardinalities.get(cat_col, row_count)
+        if n_unique <= 7:
+            return "pie", f"Small group ({n_unique} categories) + single metric → donut"
+
+    # ── [FIX-4] Dot Plot: narrow numeric range ────────────────────────────────
+    # لو عندنا categorical + numeric وكل الـ numeric values متقاربة جداً
+    # نستخدم dot plot عشان bar chart بيكذب بصرياً على الفرق
+    if cat_cols and numeric_cols:
+        num_col   = numeric_cols[0]
+        rng_stats = numeric_range.get(num_col, {})
+        cv        = rng_stats.get("cv", 1.0)  # Coefficient of Variation
+
+        # CV < 0.05 means values are within ~5% of each other → range ضيق
+        if cv < 0.05 and row_count >= 3:
+            return "dot_plot", (
+                f"Narrow value range (CV={cv:.3f}) for '{num_col}' → "
+                f"dot plot avoids visually exaggerating {rng_stats.get('min', 0):.2f}–"
+                f"{rng_stats.get('max', 0):.2f} spread"
+            )
+
+    # ── [FIX-3] Categorical comparison → h_bar or bar ────────────────────────
+    if cat_cols and numeric_cols:
+        cat_col  = cat_cols[0]
+        n_unique = cardinalities.get(cat_col, row_count)
+
+        if n_unique > 30:
+            return "table", f"Too many categories ({n_unique}) for bar — using table"
+
+        # [FIX-2] لو categories > 10 وفي proportion context → treemap
+        # (حتى لو intent مش proportion explicitly)
+        if n_unique > 10 and intent in ("proportion", "composition", "ranking"):
+            return "treemap", (
+                f"High cardinality ({n_unique} categories) in ranking/proportion context → treemap"
+            )
+
+        # [FIX-3] الـ horizontal bar decision:
+        # - لو avg label length > 8 chars → h_bar (عشان الـ labels مش تتداخل)
+        # - أو لو n_unique > 8 → h_bar (أسهل للقراءة)
+        use_horizontal = avg_label_len > 8 or n_unique > 8
+        if use_horizontal:
+            return "h_bar", (
+                f"{'Long labels (avg {avg_label_len:.1f} chars)' if avg_label_len > 8 else ''}"
+                f"{'Many categories (' + str(n_unique) + ')' if n_unique > 8 else ''}"
+                f" → horizontal bar for readability"
+            )
+
+        return "bar", (
+            f"Categorical comparison: '{cat_col}' vs '{numeric_cols[0]}' ({n_unique} categories)"
+        )
+
+    # ── Two numeric columns → scatter / correlation ───────────────────────────
+    if len(numeric_cols) >= 2:
+        return "scatter", f"Correlation between '{numeric_cols[0]}' and '{numeric_cols[1]}'"
+
+    # ── Single numeric column ─────────────────────────────────────────────────
+    if len(numeric_cols) == 1 and row_count == 1:
+        return "indicator", f"Single numeric value: '{numeric_cols[0]}'"
+
+    # ── Fallback ──────────────────────────────────────────────────────────────
+    return "table", "No clear visual encoding — raw table"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 3 — LLM: labels only
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _fetch_layout_meta(
+    chart_type: str,
+    intent: str,
+    question: str,
+    columns: list,
+    row_count: int,
+    data_sample: list,
+) -> dict[str, str]:
+    """Ask LLM only for title, axis labels, and rationale. Never chart type."""
+    llm    = get_llm(temperature=0)
+    prompt = _LAYOUT_PROMPT.format(
+        chart_type=chart_type,
+        intent=intent,
+        question=question,
+        columns=json.dumps(columns),
+        row_count=row_count,
+        data_sample=json.dumps(data_sample[:10], indent=2, default=str),
+    )
     try:
         response = await llm.ainvoke(prompt)
-        content = response.content
-        logger.info("llm_visualization_response_received", job_id=state.get("job_id"))
-
-        viz_config = _parse_json(content)
-
-        # ── Necessity check ───────────────────────────────────────────────────
-        if not viz_config.get("should_visualize", True):
-            logger.info("visualization_skipped_per_agent", job_id=state.get("job_id"))
-            return {"chart_json": None, "chart_engine": "plotly"}
-
-        figure = viz_config.get("figure")
-        if not figure or not isinstance(figure, dict) or not figure.get("data"):
-            logger.warning("invalid_plotly_figure_from_llm", content=content)
-            figure = _build_fallback_table(analysis)
-
-        # ── Hydrate figure with full data (LLM only sees 10 rows) ─────────────
-        figure = _hydrate_traces(figure, data_sample, analysis.get("columns", []))
-
-        # ── Merge premium dark-mode layout ────────────────────────────────────
-        figure["layout"] = _deep_merge(_BASE_LAYOUT, figure.get("layout") or {})
-        figure["config"] = _RESPONSIVE_CONFIG
-
-        logger.info(
-            "plotly_figure_built",
-            job_id=state.get("job_id"),
-            trace_count=len(figure["data"]),
-            viz_type=figure["data"][0].get("type") if figure["data"] else "unknown",
-        )
-
-        return {"chart_json": figure, "chart_engine": "plotly"}
-
-    except Exception as exc:
-        logger.error(
-            "plotly_generation_failed",
-            error=str(exc),
-            content=content,
-            exc_info=True,
-        )
+        meta     = _parse_json(response.content)
         return {
-            "chart_json": None,
-            "chart_engine": "plotly",
-            "error": f"Plotly visualization failed: {exc}",
+            "title":     meta.get("title")    or question[:80],
+            "x_label":   meta.get("x_label")  or "",
+            "y_label":   meta.get("y_label")   or "",
+            "rationale": meta.get("rationale") or f"{chart_type} chart selected for this data.",
+        }
+    except Exception as exc:
+        logger.warning("layout_meta_llm_failed", error=str(exc))
+        return {
+            "title":     question[:80],
+            "x_label":   columns[0] if columns else "",
+            "y_label":   columns[1] if len(columns) > 1 else "",
+            "rationale": f"{chart_type} selected by data-shape rules.",
         }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 4 — Figure Builder
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_figure(
+    chart_type: str,
+    raw_data: list,
+    columns: list,
+    profile: dict[str, Any],
+    layout_meta: dict[str, str],
+) -> dict[str, Any]:
+    rows          = profile["rows"][:50]
+    numeric_cols  = profile["numeric_cols"]
+    temporal_cols = profile["temporal_cols"]
+    cat_cols      = profile["cat_cols"]
+
+    title   = layout_meta.get("title", "")
+    x_label = layout_meta.get("x_label", "")
+    y_label = layout_meta.get("y_label", "")
+
+    layout: dict[str, Any] = {
+        "title": {"text": title},
+        "xaxis": {"title": {"text": x_label}},
+        "yaxis": {"title": {"text": y_label}},
+    }
+
+    # ── Indicator ─────────────────────────────────────────────────────────────
+    if chart_type == "indicator":
+        num_col = numeric_cols[0] if numeric_cols else (columns[0] if columns else "Value")
+        value   = _coerce_float(rows[0].get(num_col)) if rows else 0
+        return {
+            "data": [{"type": "indicator", "mode": "number", "value": value or 0,
+                      "title": {"text": title or num_col, "font": {"size": 20}},
+                      "number": {"font": {"color": _FONT_COLOR, "size": 48}}}],
+            "layout": {"title": {"text": ""}},
+        }
+
+    # ── Histogram ─────────────────────────────────────────────────────────────
+    if chart_type == "histogram":
+        num_col = numeric_cols[0]
+        values  = [_coerce_float(r.get(num_col)) for r in rows]
+        values  = [v for v in values if v is not None]
+        return {
+            "data": [{"type": "histogram", "x": values, "name": num_col, "nbinsx": 20}],
+            "layout": {**layout, "bargap": 0.05},
+        }
+
+    # ── Line / Scatter ────────────────────────────────────────────────────────
+    if chart_type == "scatter":
+        x_col  = temporal_cols[0] if temporal_cols else (cat_cols[0] if cat_cols else columns[0])
+        y_col  = numeric_cols[0]  if numeric_cols  else columns[-1]
+        x_vals = [str(r.get(x_col, "")) for r in rows]
+        y_vals = [_coerce_float(r.get(y_col)) for r in rows]
+        mode   = "lines+markers" if temporal_cols else "markers"
+        return {
+            "data": [{"type": "scatter", "mode": mode,
+                      "x": x_vals, "y": y_vals, "name": y_col}],
+            "layout": layout,
+        }
+
+    # ── Vertical Bar ─────────────────────────────────────────────────────────
+    if chart_type == "bar":
+        x_col  = cat_cols[0]     if cat_cols     else columns[0]
+        y_col  = numeric_cols[0] if numeric_cols else columns[-1]
+        x_vals = [str(r.get(x_col, "")) for r in rows]
+        y_vals = [_coerce_float(r.get(y_col)) or 0 for r in rows]
+        pairs  = sorted(zip(x_vals, y_vals), key=lambda p: p[1], reverse=True)
+        x_vals, y_vals = zip(*pairs) if pairs else ([], [])
+        return {
+            "data": [{"type": "bar", "x": list(x_vals), "y": list(y_vals),
+                      "name": y_col, "orientation": "v"}],
+            "layout": layout,
+        }
+
+    # ── [FIX-3] Horizontal Bar ────────────────────────────────────────────────
+    if chart_type == "h_bar":
+        x_col  = cat_cols[0]     if cat_cols     else columns[0]
+        y_col  = numeric_cols[0] if numeric_cols else columns[-1]
+        labels = [str(r.get(x_col, "")) for r in rows]
+        values = [_coerce_float(r.get(y_col)) or 0 for r in rows]
+        # Sort ascending لأن h_bar بيعرض من أسفل لفوق
+        pairs  = sorted(zip(labels, values), key=lambda p: p[1])
+        labels, values = zip(*pairs) if pairs else ([], [])
+        h_layout = {
+            **layout,
+            "xaxis": {"title": {"text": y_label}},  # flip labels for horizontal
+            "yaxis": {"title": {"text": x_label}, "automargin": True},
+            "margin": {"l": 160, "r": 30, "t": 60, "b": 60},  # wider left margin for labels
+        }
+        return {
+            "data": [{"type": "bar", "x": list(values), "y": list(labels),
+                      "name": y_col, "orientation": "h"}],
+            "layout": h_layout,
+        }
+
+    # ── [FIX-4] Dot Plot (narrow range) ──────────────────────────────────────
+    if chart_type == "dot_plot":
+        x_col  = cat_cols[0]     if cat_cols     else columns[0]
+        y_col  = numeric_cols[0] if numeric_cols else columns[-1]
+        labels = [str(r.get(x_col, "")) for r in rows]
+        values = [_coerce_float(r.get(y_col)) or 0 for r in rows]
+        # Sort descending
+        pairs  = sorted(zip(labels, values), key=lambda p: p[1], reverse=True)
+        labels, values = zip(*pairs) if pairs else ([], [])
+
+        rng    = profile.get("numeric_range", {}).get(y_col, {})
+        mn, mx = rng.get("min", min(values)), rng.get("max", max(values))
+        padding = (mx - mn) * 0.15 or 1  # add 15% padding so dots don't hug edges
+
+        dot_layout = {
+            **layout,
+            # [FIX-4] Set axis range to honest zoom — show actual spread, not from 0
+            "xaxis": {
+                "title": {"text": y_label},
+                "range": [mn - padding, mx + padding],
+                "automargin": True,
+            },
+            "yaxis": {
+                "title": {"text": x_label},
+                "automargin": True,
+            },
+            "margin": {"l": 160, "r": 30, "t": 60, "b": 60},
+        }
+        return {
+            "data": [{
+                "type":   "scatter",
+                "mode":   "markers",
+                "x":      list(values),
+                "y":      list(labels),
+                "marker": {
+                    "size":  14,
+                    "color": _COLORWAY[0],
+                    "line":  {"color": "rgba(255,255,255,0.4)", "width": 1.5},
+                },
+                "name": y_col,
+                "text": [f"{v:.2f}" for v in values],
+                "hovertemplate": "<b>%{y}</b><br>%{x:.2f}<extra></extra>",
+            }],
+            "layout": dot_layout,
+        }
+
+    # ── Pie / Donut ───────────────────────────────────────────────────────────
+    if chart_type == "pie":
+        label_col = cat_cols[0]     if cat_cols     else columns[0]
+        value_col = numeric_cols[0] if numeric_cols else columns[-1]
+        labels    = [str(r.get(label_col, "")) for r in rows]
+        values    = [_coerce_float(r.get(value_col)) or 0 for r in rows]
+        return {
+            "data": [{"type": "pie", "labels": labels, "values": values,
+                      "hole": 0.45, "name": value_col}],
+            "layout": {"title": {"text": title}},
+        }
+
+    # ── Treemap ───────────────────────────────────────────────────────────────
+    if chart_type == "treemap":
+        label_col = cat_cols[0]     if cat_cols     else columns[0]
+        value_col = numeric_cols[0] if numeric_cols else columns[-1]
+        labels    = [str(r.get(label_col, "")) for r in rows]
+        values    = [_coerce_float(r.get(value_col)) or 0 for r in rows]
+        parents   = [""] * len(labels)
+        return {
+            "data": [{"type": "treemap", "labels": labels,
+                      "parents": parents, "values": values}],
+            "layout": {"title": {"text": title}},
+        }
+
+    # ── Table (fallback) ──────────────────────────────────────────────────────
+    return _build_fallback_table({"columns": columns, "data": raw_data})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 5 — Validation
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _validate_figure(figure: dict[str, Any]) -> str | None:
+    if not isinstance(figure, dict):
+        return "figure is not a dict"
+
+    traces = figure.get("data")
+    if not traces or not isinstance(traces, list):
+        return "figure.data is missing or empty"
+
+    for i, trace in enumerate(traces):
+        if not isinstance(trace, dict):
+            return f"trace[{i}] is not a dict"
+
+        trace_type = trace.get("type")
+        if not trace_type:
+            return f"trace[{i}] missing 'type'"
+
+        if trace_type in ("bar", "scatter"):
+            x = trace.get("x") or []
+            y = trace.get("y") or []
+            if not x or not y:
+                return f"trace[{i}] ({trace_type}) has empty x or y arrays"
+            if len(x) != len(y):
+                return f"trace[{i}] ({trace_type}) x/y length mismatch: {len(x)} vs {len(y)}"
+
+        elif trace_type == "pie":
+            if not (trace.get("labels") and trace.get("values")):
+                return f"trace[{i}] (pie) missing labels or values"
+            if len(trace["labels"]) != len(trace["values"]):
+                return f"trace[{i}] (pie) labels/values length mismatch"
+
+        elif trace_type == "indicator":
+            if trace.get("value") is None:
+                return f"trace[{i}] (indicator) missing value"
+
+        elif trace_type == "histogram":
+            if not trace.get("x"):
+                return f"trace[{i}] (histogram) empty x array"
+
+    return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _no_chart(reason: str | None) -> dict[str, Any]:
+    return {"chart_json": None, "chart_engine": "plotly",
+            "viz_rationale": reason, "error": reason}
+
 
 def _sanitize_question(q: str) -> str:
-    """Extract plain text from JSON-encoded question payloads (e.g. LangGraph history)."""
     try:
         parsed = json.loads(q)
         if isinstance(parsed, dict) and "text" in parsed:
@@ -297,124 +736,36 @@ def _sanitize_question(q: str) -> str:
     return q
 
 
-def _hydrate_traces(
-    figure: Dict[str, Any],
-    full_data: list,
-    columns: list,
-) -> Dict[str, Any]:
-    """
-    Replace LLM-generated stub arrays in traces with the actual full dataset rows.
-
-    The LLM sees only 10 rows; this function re-maps x/y/values/labels onto
-    up to 50 rows using the column names it declared.
-    """
-    if not full_data or not figure.get("data"):
-        return figure
-
-    col_index: Dict[str, list] = {}
-    if full_data and isinstance(full_data[0], (list, tuple)):
-        # Columnar format: list of rows → transpose by column index
-        for idx, col_name in enumerate(columns):
-            col_index[col_name] = [row[idx] for row in full_data if idx < len(row)]
-    elif full_data and isinstance(full_data[0], dict):
-        # Dict format: list of {col: val} dicts
-        for col_name in columns:
-            col_index[col_name] = [row.get(col_name) for row in full_data]
-
-    for trace in figure["data"]:
-        trace_type = trace.get("type", "")
-
-        # Bar / Scatter: re-map x and y
-        if trace_type in ("bar", "scatter", "histogram"):
-            x_vals = _resolve_col(trace.get("x"), col_index)
-            y_vals = _resolve_col(trace.get("y"), col_index)
-            if x_vals is not None:
-                trace["x"] = x_vals
-            if y_vals is not None:
-                trace["y"] = y_vals
-
-        # Pie / Donut
-        elif trace_type == "pie":
-            labels = _resolve_col(trace.get("labels"), col_index)
-            values = _resolve_col(trace.get("values"), col_index)
-            if labels is not None:
-                trace["labels"] = labels
-            if values is not None:
-                trace["values"] = values
-
-        # Treemap
-        elif trace_type == "treemap":
-            for key in ("labels", "parents", "values"):
-                resolved = _resolve_col(trace.get(key), col_index)
-                if resolved is not None:
-                    trace[key] = resolved
-
-        # Radar / Scatterpolar
-        elif trace_type == "scatterpolar":
-            r_vals = _resolve_col(trace.get("r"), col_index)
-            theta_vals = _resolve_col(trace.get("theta"), col_index)
-            if r_vals is not None:
-                trace["r"] = r_vals
-            if theta_vals is not None:
-                trace["theta"] = theta_vals
-
-    return figure
-
-
-def _resolve_col(
-    current_value: Any,
-    col_index: Dict[str, list],
-) -> list | None:
-    """
-    If `current_value` is a column name string present in col_index, return
-    the full column array. Otherwise return None (keep as-is).
-    """
-    if isinstance(current_value, str) and current_value in col_index:
-        return col_index[current_value]
-    return None
-
-
-def _build_fallback_table(analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a minimal Plotly Table trace when LLM output is invalid."""
+def _build_fallback_table(analysis: dict[str, Any]) -> dict[str, Any]:
     columns = analysis.get("columns", [])
-    rows = analysis.get("data", [])[:50]
+    rows    = analysis.get("data", [])[:50]
+    norm    = _normalise_rows(rows, columns)
 
-    if rows and isinstance(rows[0], dict):
-        cell_values = [[row.get(c, "") for row in rows] for c in columns]
-    elif rows and isinstance(rows[0], (list, tuple)):
-        cell_values = [[row[i] if i < len(row) else "" for row in rows] for i in range(len(columns))]
-    else:
-        cell_values = []
+    cell_values = [[r.get(c, "") for r in norm] for c in columns]
 
     return {
-        "data": [
-            {
-                "type": "table",
-                "header": {
-                    "values": columns,
-                    "fill": {"color": "rgba(99,102,241,0.25)"},
-                    "font": {"color": _FONT_COLOR, "size": 12},
-                    "align": "left",
-                    "line": {"color": "rgba(255,255,255,0.08)"},
-                },
-                "cells": {
-                    "values": cell_values,
-                    "fill": {"color": ["rgba(255,255,255,0.03)", "rgba(255,255,255,0.01)"]},
-                    "font": {"color": _FONT_COLOR, "size": 12},
-                    "align": "left",
-                    "line": {"color": "rgba(255,255,255,0.05)"},
-                },
-            }
-        ],
+        "data": [{
+            "type": "table",
+            "header": {
+                "values":  columns,
+                "fill":    {"color": "rgba(99,102,241,0.25)"},
+                "font":    {"color": _FONT_COLOR, "size": 12},
+                "align":   "left",
+                "line":    {"color": "rgba(255,255,255,0.08)"},
+            },
+            "cells": {
+                "values":  cell_values,
+                "fill":    {"color": ["rgba(255,255,255,0.03)", "rgba(255,255,255,0.01)"]},
+                "font":    {"color": _FONT_COLOR, "size": 12},
+                "align":   "left",
+                "line":    {"color": "rgba(255,255,255,0.05)"},
+            },
+        }],
         "layout": {"title": {"text": "Query Results"}},
     }
 
 
-def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Recursively merge `override` into `base`, giving priority to `override`
-    for scalar values while preserving nested dict merging.
-    """
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     result = dict(base)
     for key, val in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(val, dict):
@@ -424,19 +775,18 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
-def _parse_json(content: Any) -> Dict[str, Any]:
-    """Ultra-resilient JSON parser for LLM responses."""
+def _parse_json(content: Any) -> dict[str, Any]:
     if not isinstance(content, str) or not content.strip():
         return {}
 
-    content = content.strip()
+    content   = content.strip()
     start_idx = content.find("{")
-    end_idx = content.rfind("}")
+    end_idx   = content.rfind("}")
 
     if start_idx == -1 or end_idx == -1:
         return {}
 
-    json_str = content[start_idx : end_idx + 1]
+    json_str = content[start_idx: end_idx + 1]
 
     try:
         return json.loads(json_str)

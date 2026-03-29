@@ -42,6 +42,11 @@ class AnalysisResult(Base):
         JSON, nullable=True
     )  # Vector embedding for historical memory search
 
+    viz_rationale: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # Decision logic for selected chart type
+
+
     visual_context: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
         JSON, nullable=True
     )

@@ -148,6 +148,7 @@ async def _execute_pillar(job_id: str) -> dict:
                       chart_json=res_data.get("chart_json"),
                       insight_report=res_data.get("insight_report"),
                       exec_summary=res_data.get("executive_summary"),
+                      viz_rationale=res_data.get("viz_rationale"),
                       recommendations_json=res_data.get("recommendations"),
                       follow_up_suggestions=res_data.get("follow_up_suggestions"),
                   )
@@ -157,6 +158,7 @@ async def _execute_pillar(job_id: str) -> dict:
                           'chart_json': stmt.excluded.chart_json,
                           'insight_report': stmt.excluded.insight_report,
                           'exec_summary': stmt.excluded.exec_summary,
+                          'viz_rationale': stmt.excluded.viz_rationale,
                           'recommendations_json': stmt.excluded.recommendations_json,
                           'follow_up_suggestions': stmt.excluded.follow_up_suggestions,
                       }
