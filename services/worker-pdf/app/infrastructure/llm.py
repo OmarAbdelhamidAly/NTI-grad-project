@@ -39,7 +39,16 @@ def get_llm(temperature: float = 0, model: str | None = None) -> BaseChatModel:
     if "gemini" in primary_model_name.lower():
         llm = _make_gemini(primary_model_name)
     elif "groq" in primary_model_name.lower() or "llama-3" in primary_model_name.lower():
-        llm = _make_groq(primary_model_name)
+        # Adaptive token limits for vision models
+        max_tokens = 4096 if "vision" in primary_model_name.lower() else 2048
+        llm = ChatOpenAI(
+            model=primary_model_name,
+            api_key=settings.GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_retries=1,
+        )
     else:
         llm = _make_groq("llama-3.1-8b-instant")
 

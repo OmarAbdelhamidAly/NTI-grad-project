@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, Loader2, Database, MessageSquare, Mic, Zap } from 'lucide-react';
+import { Send, Sparkles, Loader2, Database, MessageSquare, Mic, Zap, CheckCircle, ArrowRight, Flag, ShieldCheck } from 'lucide-react';
 import { AnalysisAPI, DataSourcesAPI, VoiceAPI } from '../../services/api';
+import type { AnalysisJob } from '../../services/api';
 import { recorder } from '../../utils/audio';
 import MessageBubble from './MessageBubble';
 import { useAnalysisPolling } from '../../hooks/useAnalysisPolling';
@@ -11,17 +12,25 @@ interface ChatInterfaceProps {
   activeSourceIds: string[];
 }
 
+interface HITLState {
+  jobId: string;
+  job: AnalysisJob;
+  isActing: boolean;
+}
+
 export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
-  const depthIndex = 3; // Default to Deep indexing as requested
+  const depthIndex = 3;
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [viewMode, setViewMode] = useState<'chat' | 'profile'>('chat');
-  
+  const [hitlState, setHitlState] = useState<HITLState | null>(null);
+
   // Storage key based on active sources
   const storageKey = activeSourceIds.length > 0 ? `chat_history_${activeSourceIds.join('_')}` : null;
 
   // Load chat history from localStorage when source changes
   useEffect(() => {
+    setHitlState(null);
     if (storageKey) {
       const saved = localStorage.getItem(storageKey);
       if (saved) {
@@ -40,6 +49,7 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
       localStorage.setItem(storageKey, JSON.stringify(messages));
     }
   }, [messages, storageKey]);
+
   const [schema, setSchema] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { isProcessing, setIsProcessing, startPolling } = useAnalysisPolling();
@@ -50,9 +60,7 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
     }
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, viewMode]);
+  useEffect(() => { scrollToBottom(); }, [messages, viewMode]);
 
   useEffect(() => {
     if (activeSourceIds.length === 1) {
@@ -66,9 +74,49 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
   }, [activeSourceIds]);
 
   const onMessageUpdate = (id: string, updates: Partial<Message>) => {
-    setMessages(prev => prev.map(msg => 
+    setMessages(prev => prev.map(msg =>
       msg.id === id ? { ...msg, ...updates } : msg
     ));
+  };
+
+  const handleHITL = (jobId: string, job: AnalysisJob) => {
+    setHitlState({ jobId, job, isActing: false });
+  };
+
+  const handleContinue = async () => {
+    if (!hitlState) return;
+    setHitlState(prev => prev ? { ...prev, isActing: true } : null);
+    try {
+      await AnalysisAPI.approveJob(hitlState.jobId);
+      setHitlState(null);
+      // Resume polling for the continued job
+      const continuedMsgId = (Date.now()).toString();
+      const continuedMsg: Message = {
+        id: continuedMsgId,
+        role: 'assistant',
+        isStreaming: true,
+        job: { ...hitlState.job, status: 'running' }
+      };
+      setMessages(prev => [...prev, continuedMsg]);
+      await startPolling(hitlState.jobId, continuedMsgId, onMessageUpdate, () => {}, handleHITL);
+    } catch (e) {
+      console.error("Continue failed", e);
+      setHitlState(prev => prev ? { ...prev, isActing: false } : null);
+    }
+  };
+
+  const handleFinalize = async () => {
+    if (!hitlState) return;
+    setHitlState(null);
+    // The synthesis_report already contains all gathered insights. Show it.
+    const finalMsg: Message = {
+      id: Date.now().toString(),
+      role: 'assistant',
+      isStreaming: false,
+      job: { ...hitlState.job, status: 'done' },
+      content: hitlState.job.synthesis_report || "Analysis finalized with available insights."
+    };
+    setMessages(prev => [...prev, finalMsg]);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -80,47 +128,38 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
     const systemMessage: Message = { id: systemId, role: 'assistant', isStreaming: true };
 
     setMessages(prev => [...prev, userMessage, systemMessage]);
+    setHitlState(null);
     setInput('');
 
     try {
       const validHistory = messages
-
         .slice(-3)
         .map(m => ({ role: m.role, content: m.content || "" }));
 
+      const primarySourceId = activeSourceIds[0];
+      const multiSourceIds = activeSourceIds.length > 1 ? activeSourceIds.slice(1) : undefined;
+
       const { job_id } = await AnalysisAPI.submitQuery(
-        userMessage.content!, 
-        activeSourceIds[0], 
-        activeSourceIds.length > 1 ? activeSourceIds : undefined,
+        userMessage.content!,
+        primarySourceId,
+        multiSourceIds,
         depthIndex,
         validHistory
       );
-      await startPolling(job_id, systemId, onMessageUpdate, () => {});
+      await startPolling(job_id, systemId, onMessageUpdate, () => {}, handleHITL);
     } catch (error: any) {
       console.error("Submit error", error);
-      
-      // Extract error message from backend response
       let errorMessage = "Sorry, there was an error submitting your request.";
-      
       if (error.response) {
-        // HTTP 423: PDF still being indexed
         if (error.response.status === 423) {
-          errorMessage = error.response.data?.detail || "⏳ PDF is still being indexed. Please wait for indexing to complete before asking questions.";
-        } 
-        // HTTP 422: PDF indexing failed
-        else if (error.response.status === 422) {
+          errorMessage = error.response.data?.detail || "⏳ PDF is still being indexed. Please wait before asking questions.";
+        } else if (error.response.status === 422) {
           errorMessage = error.response.data?.detail || "❌ PDF indexing failed. Please re-upload the document.";
-        }
-        // Other HTTP errors with detail message
-        else if (error.response.data?.detail) {
+        } else if (error.response.data?.detail) {
           errorMessage = error.response.data.detail;
         }
       }
-      
-      onMessageUpdate(systemId, { 
-        content: errorMessage, 
-        isStreaming: false 
-      });
+      onMessageUpdate(systemId, { content: errorMessage, isStreaming: false });
       setIsProcessing(false);
     }
   };
@@ -130,13 +169,13 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
       {/* View Toggle - Only for single source profiling */}
       {activeSourceIds.length === 1 && (
         <div className="absolute top-4 right-8 z-10 flex gap-1 bg-[#171033]/60 backdrop-blur-xl p-1 border border-slate-700/50 rounded-2xl shadow-2xl">
-          <button 
+          <button
             onClick={() => setViewMode('chat')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'chat' ? 'bg-[var(--primary)] text-white shadow-lg shadow-[var(--primary)]/20' : 'text-slate-500 hover:text-slate-200'}`}
           >
             <MessageSquare className="w-3.5 h-3.5" /> Intelligence
           </button>
-          <button 
+          <button
             onClick={() => setViewMode('profile')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'profile' ? 'bg-[var(--primary)] text-white shadow-lg shadow-[var(--primary)]/20' : 'text-slate-500 hover:text-slate-200'}`}
           >
@@ -156,47 +195,173 @@ export default function ChatInterface({ activeSourceIds }: ChatInterfaceProps) {
           ) : messages.length === 0 ? (
             <EmptyStateWelcome setInput={setInput} schema={schema} />
           ) : (
-            <div className="max-w-5xl mx-auto space-y-8 pb-32">
+            <div className="max-w-5xl mx-auto space-y-8 pb-64">
               {Array.isArray(messages) && messages.map((msg) => (
                 <MessageBubble key={msg.id} message={msg} />
               ))}
+
+              {/* ── HITL Approval Card ───────────────────────────────── */}
+              {hitlState && (
+                <HITLCard
+                  job={hitlState.job}
+                  isActing={hitlState.isActing}
+                  onContinue={handleContinue}
+                  onFinalize={handleFinalize}
+                />
+              )}
+
               <div ref={messagesEndRef} />
             </div>
           )}
         </div>
       )}
 
-      <ChatInput 
+      <ChatInput
         input={input}
         setInput={setInput}
         handleSubmit={handleSubmit}
         isProcessing={isProcessing}
-        disabled={activeSourceIds.length === 0 || viewMode === 'profile'}
+        disabled={activeSourceIds.length === 0 || viewMode === 'profile' || !!hitlState}
       />
     </div>
   );
 }
 
-// Sub-components for better readability
+// ── HITL Card ──────────────────────────────────────────────────────────────────
+function HITLCard({
+  job,
+  isActing,
+  onContinue,
+  onFinalize,
+}: {
+  job: AnalysisJob;
+  isActing: boolean;
+  onContinue: () => void;
+  onFinalize: () => void;
+}) {
+  const pillars = job.required_pillars || [];
+  const currentIndex = job.complexity_index ?? 1; // 1-based, already completed
+
+  const nextPillarName = pillars[currentIndex]
+    ? pillars[currentIndex].toUpperCase()
+    : null;
+
+  return (
+    <div className="animate-in slide-in-from-bottom-4 duration-500">
+      {/* Progress Stepper */}
+      <div className="flex items-center justify-center gap-2 mb-6">
+        {pillars.map((pillar: string, i: number) => {
+          const isDone = i < currentIndex;
+          const isCurrent = i === currentIndex - 1;
+          const isNext = i === currentIndex;
+          return (
+            <div key={i} className="flex items-center gap-2">
+              <div className={`
+                flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all
+                ${isDone ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : ''}
+                ${isCurrent ? 'bg-[var(--primary)]/10 border-[var(--primary)]/40 text-[var(--primary)]' : ''}
+                ${isNext ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 animate-pulse' : ''}
+                ${!isDone && !isCurrent && !isNext ? 'bg-slate-800/50 border-slate-700/30 text-slate-600' : ''}
+              `}>
+                {isDone && <CheckCircle className="w-3 h-3" />}
+                {isCurrent && <ShieldCheck className="w-3 h-3" />}
+                {isNext && <ArrowRight className="w-3 h-3" />}
+                {pillar.toUpperCase()}
+              </div>
+              {i < pillars.length - 1 && (
+                <div className={`w-6 h-px ${i < currentIndex - 1 ? 'bg-emerald-500' : 'bg-slate-700'}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Main Card */}
+      <div className="relative rounded-[28px] border border-amber-500/20 bg-gradient-to-br from-amber-500/5 via-slate-900/80 to-slate-900/80 backdrop-blur-xl p-6 shadow-2xl shadow-amber-500/5">
+        <div className="absolute -inset-px rounded-[28px] bg-gradient-to-br from-amber-500/10 to-transparent opacity-50 pointer-events-none" />
+
+        <div className="flex items-start gap-4 mb-5">
+          <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
+            <ShieldCheck className="w-5 h-5 text-amber-400" />
+          </div>
+          <div>
+            <p className="text-[10px] font-black text-amber-400 uppercase tracking-[0.2em] mb-1">
+              🛡️ Sovereign Intelligence — Checkpoint {currentIndex}/{pillars.length}
+            </p>
+            <h3 className="text-white font-black text-base">
+              Step {currentIndex} Complete — Awaiting Command
+            </h3>
+            <p className="text-slate-400 text-xs font-medium mt-1">
+              {pillars[currentIndex - 1]?.toUpperCase()} specialist has delivered its findings.
+              {nextPillarName
+                ? ` Ready to deploy ${nextPillarName} specialist.`
+                : ' All specialists have reported. Ready to finalize.'}
+            </p>
+          </div>
+        </div>
+
+        {/* Partial Synthesis Preview */}
+        {job.synthesis_report && (
+          <div className="mb-5 p-4 rounded-2xl bg-slate-900/60 border border-slate-700/30">
+            <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mb-2">
+              📋 Accumulated Intelligence
+            </p>
+            <p className="text-xs text-slate-300 leading-relaxed line-clamp-4 font-medium">
+              {job.synthesis_report.replace(/###.*?\n/g, '').trim()}
+            </p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex gap-3">
+          {nextPillarName && (
+            <button
+              onClick={onContinue}
+              disabled={isActing}
+              className="flex-1 flex items-center justify-center gap-2 py-3.5 px-5 rounded-2xl bg-[var(--primary)] hover:brightness-110 text-white text-xs font-black uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 shadow-lg shadow-[var(--primary)]/20"
+            >
+              {isActing ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <ArrowRight className="w-4 h-4" />
+              )}
+              Continue → {nextPillarName} Specialist
+            </button>
+          )}
+          <button
+            onClick={onFinalize}
+            disabled={isActing}
+            className="flex items-center justify-center gap-2 py-3.5 px-5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-black uppercase tracking-widest border border-slate-700/50 transition-all active:scale-95 disabled:opacity-50"
+          >
+            <Flag className="w-4 h-4" />
+            Finalize Report
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Sub-components ─────────────────────────────────────────────────────────────
 function EmptyStateSelectSource() {
   const steps = [
-    { 
-      id: "01", 
-      title: "Target Sources", 
+    {
+      id: "01",
+      title: "Target Sources",
       ar: "حدد المصادر",
       desc: "Select CSV, SQL, or PDFs from the nexus sidebar to begin.",
       icon: <Database className="w-5 h-5" />
     },
-    { 
-      id: "02", 
-      title: "Cross-Correlate", 
+    {
+      id: "02",
+      title: "Cross-Correlate",
       ar: "ربط البيانات",
       desc: "OpenQ.AI automatically links disparate sources in memory.",
       icon: <Sparkles className="w-5 h-5" />
     },
-    { 
-      id: "03", 
-      title: "Synthesize", 
+    {
+      id: "03",
+      title: "Synthesize",
       ar: "التركيب الذكي",
       desc: "Generate autonomous executive insights and unified reports.",
       icon: <Zap className="w-5 h-5" />
@@ -207,8 +372,8 @@ function EmptyStateSelectSource() {
     <div className="flex flex-col items-center justify-center h-full text-center px-4 animate-in fade-in zoom-in duration-1000">
       <div className="mb-12">
         <div className="w-20 h-20 rounded-[32px] bg-[var(--primary)]/10 flex items-center justify-center mx-auto mb-6 relative">
-            <div className="absolute -inset-4 bg-[var(--primary)]/5 blur-2xl rounded-full animate-pulse"></div>
-            <Sparkles className="w-8 h-8 text-[var(--primary)] relative z-10" />
+          <div className="absolute -inset-4 bg-[var(--primary)]/5 blur-2xl rounded-full animate-pulse"></div>
+          <Sparkles className="w-8 h-8 text-[var(--primary)] relative z-10" />
         </div>
         <h2 className="text-3xl font-black text-white tracking-tighter uppercase mb-2">Sovereign Intelligence</h2>
         <p className="text-slate-500 text-[10px] font-black uppercase tracking-[0.3em]">Autonomous Multi-Source Synthesis</p>
@@ -239,14 +404,14 @@ function EmptyStateSelectSource() {
 }
 
 function EmptyStateWelcome({ setInput, schema }: { setInput: (v: string) => void, schema?: any }) {
-  const suggestions: string[] = schema?.suggested_questions && schema.suggested_questions.length > 0 
-    ? schema.suggested_questions 
+  const suggestions: string[] = schema?.suggested_questions && schema.suggested_questions.length > 0
+    ? schema.suggested_questions
     : [
-    "Summarize key anomalies in this dataset",
-    "Predict trends for the next fiscal quarter",
-    "Identify cross-source correlations",
-    "Analyze data quality and suggest fixes"
-  ];
+      "Summarize key anomalies in this dataset",
+      "Predict trends for the next fiscal quarter",
+      "Identify cross-source correlations",
+      "Analyze data quality and suggest fixes"
+    ];
 
   return (
     <div className="flex flex-col items-center justify-center h-full mt-20 text-center animate-in fade-in slide-in-from-bottom-8 duration-1000">
@@ -254,16 +419,16 @@ function EmptyStateWelcome({ setInput, schema }: { setInput: (v: string) => void
         Awaiting Directive
       </h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-2xl w-full">
-         {suggestions.map((s, i) => (
-           <button 
-             key={i}
-             onClick={() => setInput(s)}
-             className="p-4 bg-white/5 border border-slate-800/50 rounded-2xl text-left hover:border-[var(--primary)]/40 hover:bg-[var(--primary)]/5 transition-all group"
-           >
-             <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest group-hover:text-[var(--primary)] mb-1">Inquiry Vector 0{i+1}</p>
-             <p className="text-xs font-bold text-slate-300 group-hover:text-white">{s}</p>
-           </button>
-         ))}
+        {suggestions.map((s, i) => (
+          <button
+            key={i}
+            onClick={() => setInput(s)}
+            className="p-4 bg-white/5 border border-slate-800/50 rounded-2xl text-left hover:border-[var(--primary)]/40 hover:bg-[var(--primary)]/5 transition-all group"
+          >
+            <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest group-hover:text-[var(--primary)] mb-1">Inquiry Vector 0{i + 1}</p>
+            <p className="text-xs font-bold text-slate-300 group-hover:text-white">{s}</p>
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -302,22 +467,23 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled }: Ch
     }
   };
 
-  // Depth configuration removed as requested
-
   return (
     <div className="absolute bottom-0 w-full bg-gradient-to-t from-[#0a0d17] via-[#0a0d17]/95 to-transparent pt-20 pb-8 px-6 pointer-events-none">
       <div className="max-w-4xl mx-auto relative group pointer-events-auto">
-        
-        {/* Depth Index Switcher Removed as requested */}
-
         <div className="absolute -inset-1 bg-gradient-to-r from-[var(--primary)] to-[var(--primary-alt)] rounded-[32px] opacity-10 group-hover:opacity-20 blur-xl transition duration-500"></div>
         <form onSubmit={handleSubmit} className="relative flex items-center bg-[#0a0d17]/80 backdrop-blur-3xl border border-slate-800/50 rounded-[28px] p-2.5 shadow-2xl transition-all group-focus-within:border-[var(--primary)]/40">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={isRecording ? "Listening to directive..." : !disabled ? "Execute a complex analytical inquiry..." : "Establish a data nexus to begin..."}
+            placeholder={
+              disabled && !isProcessing
+                ? "Awaiting command — respond to the checkpoint above..."
+                : isRecording
+                  ? "Listening to directive..."
+                  : "Execute a complex analytical inquiry..."
+            }
             disabled={disabled || isProcessing}
-            className={`resize-none flex-1 bg-transparent text-slate-200 placeholder-slate-600 px-5 py-4 outline-none min-h-[64px] custom-scroll text-sm font-bold transition-all ${isRecording ? 'text-red-400' : ''}`}
+            className={`resize-none flex-1 bg-transparent text-slate-200 placeholder-slate-600 px-5 py-4 outline-none min-h-[64px] custom-scroll text-sm font-bold transition-all ${isRecording ? 'text-red-400' : ''} ${disabled ? 'opacity-40' : ''}`}
             rows={1}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -327,7 +493,7 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled }: Ch
             }}
           />
           <div className="flex items-center gap-2 pr-2">
-            <button 
+            <button
               type="button"
               onClick={handleVoiceSearch}
               disabled={disabled || isProcessing}
@@ -335,7 +501,7 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled }: Ch
             >
               {isRecording ? <Loader2 className="w-5 h-5 animate-spin" /> : <Mic className="w-5 h-5" />}
             </button>
-            <button 
+            <button
               type="submit"
               disabled={!input.trim() || disabled || isProcessing}
               className="p-4 bg-[var(--primary)] hover:brightness-110 text-white rounded-2xl shadow-xl shadow-[var(--primary)]/20 disabled:opacity-30 disabled:grayscale transition-all active:scale-95 flex items-center justify-center shrink-0"
@@ -344,7 +510,7 @@ function ChatInput({ input, setInput, handleSubmit, isProcessing, disabled }: Ch
             </button>
           </div>
         </form>
-           <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">Groq Llama-3.3-70B</p>
+        <p className="text-[9px] font-black text-slate-500 uppercase tracking-[0.2em]">Groq Llama-3.3-70B</p>
       </div>
     </div>
   );

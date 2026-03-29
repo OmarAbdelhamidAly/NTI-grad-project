@@ -1,22 +1,41 @@
 """PDF Indexing Agent — Vision-based ingestion using ColPali patches."""
 import os
 import uuid
-import torch
+import gc
+import base64
 import structlog
-import json
+from io import BytesIO
 from typing import Any, Dict, List, Optional
 from PIL import Image
 from pdf2image import convert_from_path, pdfinfo_from_path
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from app.infrastructure.llm import get_llm
 from app.infrastructure.database.postgres import async_session_factory
 from app.models.knowledge import Document, KnowledgeBase
 from app.models.tenant import Tenant
-from app.modules.pdf.flows.deep_vision.agents.pdf_agent import get_colpali
 from app.modules.pdf.utils.qdrant_multivector import QdrantMultiVectorManager
 from sqlalchemy import select, update as sql_update
 from sqlalchemy.orm import selectinload
-import gc
 
 logger = structlog.get_logger(__name__)
+
+# ── Lazy singletons ────────────────────────────────────────────────────────────
+_embed_model = None
+
+def _get_embedding_model():
+    """Returns local Embeddings via FastEmbed.
+    
+    Bypassing Gemini embeddings because Google AI Studio returns 404/geo-blocks,
+    and OpenRouter isn't available. FastEmbed is already installed in requirements.txt.
+    """
+    from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
+    
+    # Defaults to BAAI/bge-small-en-v1.5 which is 384 dimensions natively
+    # To match our 768 vector size, we will use nomic-ai/nomic-embed-text-v1.5
+    return FastEmbedEmbeddings(
+        model_name="nomic-ai/nomic-embed-text-v1.5" # 768 dimensions
+    )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  HUMAN-AI SYNERGY: PURE CLASSIFICATION BY USER
@@ -264,7 +283,7 @@ async def _run_indexing_core(
     is_source: bool,
     initial_schema: Dict[str, Any] = None
 ) -> Dict[str, Any]:
-    """Core logic to index a PDF file into Qdrant."""
+    """Core logic to index a PDF file into Qdrant using Groq Vision."""
     if initial_schema is None:
         initial_schema = {}
         
@@ -275,112 +294,105 @@ async def _run_indexing_core(
     info = pdfinfo_from_path(file_path)
     total_pages = info["Pages"]
     
-    model, processor = get_colpali()
+    # 1. Initialize Models
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    import asyncio
+    from app.infrastructure.config import settings
     
-    # Collection naming logic: kb_{kb_id} if exists, else ds_{source_id}
+    # Using Gemini 3 Flash for vision since Groq completely decommissioned their free vision models today.
+    # This ensures graphs and tables are accurately captured!
+    vision_llm = ChatGoogleGenerativeAI(
+        model="gemini-3-flash", 
+        temperature=0,
+        google_api_key=settings.GEMINI_API_KEY
+    )
+    embed_model = _get_embedding_model()
+    
+    # 2. Collection Setup
     if kb_id:
         collection_name = f"kb_{str(kb_id).replace('-', '')}"
     else:
         collection_name = f"ds_{str(id_for_meta).replace('-', '')}"
         
     qdrant = QdrantMultiVectorManager(collection_name=collection_name)
-    await qdrant.ensure_collection()
+    await qdrant.ensure_collection(text_vector_size=768) # embedding-001 is 768-dim
 
-    # Optimization: Extreme minimalist batching for high-res vision models
-    CHUNK_SIZE = 1 # Force single-page inference to prevent huge OOM/Swap spikes
-    RENDER_BATCH_SIZE = 1 # One-by-one rendering to ensure immediate visibility of progress
-    
-    import hashlib
-    
-    for start_page in range(1, total_pages + 1, RENDER_BATCH_SIZE):
-        end_render_page = min(start_page + RENDER_BATCH_SIZE - 1, total_pages)
+    # 3. Processing Loop
+    for current_page in range(1, total_pages + 1):
+        logger.info(f"Processing PDF page {current_page} of {total_pages} (Groq Vision)...")
         
-        logger.info(f"Rendering PDF pages {start_page} to {end_render_page} (Total: {total_pages})...")
-        # Batch PDF rendering - much more efficient than page-by-page
-        render_batch = convert_from_path(
+        # Render single page
+        images = convert_from_path(
             file_path, 
-            dpi=120, # Optimized DPI
-            first_page=start_page, 
-            last_page=end_render_page,
-            thread_count=2 # Reduced thread count to save memory
+            dpi=72, 
+            first_page=current_page, 
+            last_page=current_page
+        )
+        if not images:
+            continue
+        page_image = images[0]
+        
+        # Enforce Groq's absolute max resolution of 1120x1120
+        page_image.thumbnail((1120, 1120))
+        
+        # Update progress
+        progress = int((current_page / total_pages) * 98)
+        async with async_session_factory() as db:
+            update_data = {
+                "progress": progress, 
+                "current_step": f"Groq Vision Analysis: Page {current_page} of {total_pages}",
+                "page_count": total_pages
+            }
+            if is_source:
+                from app.models.data_source import DataSource
+                await db.execute(sql_update(DataSource).where(DataSource.id == uuid.UUID(id_for_meta)).values(schema_json={**initial_schema, **update_data}))
+            else:
+                from app.models.knowledge import Document
+                await db.execute(sql_update(Document).where(Document.id == uuid.UUID(id_for_meta)).values(metadata_json={**initial_schema, **update_data}))
+            await db.commit()
+
+        # A. Vision Analysis via Groq
+        buffered = BytesIO()
+        page_image.save(buffered, format="JPEG", quality=80)
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        
+        prompt = "Extract all text, tables, and key visual elements from this document page. Provide a structured, searchable description. Focus on content that a user might search for."
+        
+        # Respect Gemini free tier limit of ~15 Requests Per Minute (wait 4.5 seconds per page)
+        await asyncio.sleep(4.5)
+        
+        message = HumanMessage(content=[
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}}
+        ])
+        
+        try:
+            res = await vision_llm.ainvoke([message])
+            page_description = res.content
+        except Exception as e:
+            logger.error("groq_vision_failed", page=current_page, error=str(e))
+            page_description = f"Error analyzing page {current_page}. Vision API failed."
+
+        # B. Embedding Generation
+        text_vector = embed_model.embed_query(page_description)
+        
+        # C. Qdrant Sync
+        page_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"{id_for_meta}_{current_page}")
+        qdrant.upsert_page(
+            page_id=str(page_uuid),
+            text_vector=text_vector,
+            metadata={
+                "doc_id": id_for_meta if not is_source else None,
+                "source_id": id_for_meta if is_source else None,
+                "kb_id": str(kb_id) if kb_id else None,
+                "page_num": current_page,
+                "description": page_description, # Store description for context
+                "is_header_page": current_page == 1
+            }
         )
         
-        if not render_batch:
-            continue
-            
-        # Process the rendered batch in smaller inference chunks
-        for chunk_offset in range(0, len(render_batch), CHUNK_SIZE):
-            chunk_images = render_batch[chunk_offset: chunk_offset + CHUNK_SIZE]
-            current_page_base = start_page + chunk_offset
-            
-            # Update progress for EVERY page to give the user confidence
-            progress = int((current_page_base / total_pages) * 98)
-            async with async_session_factory() as db:
-                if is_source:
-                    from app.models.data_source import DataSource
-                    await db.execute(
-                        sql_update(DataSource)
-                        .where(DataSource.id == uuid.UUID(id_for_meta))
-                        .values(schema_json={
-                            **initial_schema,
-                            "progress": progress, 
-                            "current_step": f"Neural Vision Trace: Page {current_page_base} of {total_pages} processed",
-                            "page_count": total_pages
-                        })
-                    )
-                else:
-                    from app.models.knowledge import Document
-                    await db.execute(
-                        sql_update(Document)
-                        .where(Document.id == uuid.UUID(id_for_meta))
-                        .values(metadata_json={
-                            **initial_schema,
-                            "progress": progress, 
-                            "current_step": f"Neural Vision Trace: Page {current_page_base} of {total_pages} processed",
-                            "page_count": total_pages
-                        })
-                    )
-                await db.commit()
-            
-            logger.info("page_indexing_step", page=current_page_base, total=total_pages, doc_id=id_for_meta)
-            
-            with torch.inference_mode(): # More efficient than no_grad
-                processed_batch = processor.process_images(chunk_images).to(model.device)
-                image_embeddings = model.forward(**processed_batch)
-                
-                points_to_upsert = []
-                for i, image_emb in enumerate(image_embeddings):
-                    current_page = current_page_base + i
-                    page_vectors = image_emb.cpu().tolist()
-                    
-                    # Metadata for retrieval
-                    smart_metadata = {
-                        "doc_id": id_for_meta if not is_source else None,
-                        "source_id": id_for_meta if is_source else None,
-                        "kb_id": str(kb_id) if kb_id else None,
-                        "page_num": current_page,
-                        "is_header_page": current_page == 1
-                    }
-
-                    # Generate a deterministic UUID for the page point
-                    page_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"{id_for_meta}_{current_page}")
-                    
-                    points_to_upsert.append({
-                        "id": str(page_uuid),
-                        "colpali_vectors": page_vectors,
-                        "muvera_vector": [0.0] * 40960, # Placeholder
-                        "metadata": smart_metadata
-                    })
-
-                # Batch upsert to Qdrant (async-style wait=False)
-                qdrant.upsert_batch(points_to_upsert, wait=False)
-                
-                # Cleanup to keep memory stable
-                del processed_batch
-                del image_embeddings
-                gc.collect() # Force immediate garbage collection
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+        # Memory Cleanup
+        gc.collect()
 
     doc_dna = _build_static_metadata(context_hint)
     
@@ -388,7 +400,6 @@ async def _run_indexing_core(
     async with async_session_factory() as db:
         if is_source:
             from app.models.data_source import DataSource
-            from sqlalchemy import update as sql_update
             await db.execute(
                 sql_update(DataSource)
                 .where(DataSource.id == uuid.UUID(id_for_meta))
@@ -402,7 +413,6 @@ async def _run_indexing_core(
             )
         else:
             from app.models.knowledge import Document
-            from sqlalchemy import update as sql_update
             await db.execute(
                 sql_update(Document)
                 .where(Document.id == uuid.UUID(id_for_meta))

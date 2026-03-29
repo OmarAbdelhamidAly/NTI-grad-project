@@ -219,6 +219,7 @@ export default function Sidebar({
             ) : (
               filteredSources.map((source) => {
                 const isActive = activeSourceIds.includes(source.id);
+                const selectionIndex = activeSourceIds.indexOf(source.id); // 0-based
                 return (
                   <div
                     key={source.id}
@@ -234,11 +235,19 @@ export default function Sidebar({
                     `}
                   >
                     <div className="flex items-center gap-3 truncate">
-                      <div className={`p-1.5 rounded-lg ${isActive ? 'bg-[var(--primary)] text-white' : 'bg-slate-800 text-slate-500'}`}>
-                        {source.type === 'csv' && <FileText className="w-3 h-3" />}
-                        {source.type === 'sql' && <Database className="w-3 h-3" />}
-                        {source.type === 'pdf' && <BookOpen className="w-3 h-3" />}
-                        {source.type === 'json' && <Box className="w-3 h-3" />}
+                      <div className="relative shrink-0">
+                        <div className={`p-1.5 rounded-lg ${isActive ? 'bg-[var(--primary)] text-white' : 'bg-slate-800 text-slate-500'}`}>
+                          {source.type === 'csv' && <FileText className="w-3 h-3" />}
+                          {source.type === 'sql' && <Database className="w-3 h-3" />}
+                          {source.type === 'pdf' && <BookOpen className="w-3 h-3" />}
+                          {source.type === 'json' && <Box className="w-3 h-3" />}
+                        </div>
+                        {/* Sequence badge for multi-select */}
+                        {isActive && activeSourceIds.length > 1 && (
+                          <div className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-amber-500 text-[9px] font-black text-black flex items-center justify-center shadow-lg shadow-amber-500/30">
+                            {selectionIndex + 1}
+                          </div>
+                        )}
                       </div>
                       <span className={`text-xs font-bold truncate ${isActive ? 'text-white' : 'text-slate-400'}`}>
                         {source.name}

@@ -26,17 +26,12 @@ async def speech_to_text(
         # Read file into memory
         content = await file.read()
         filename = file.filename or "audio.webm"
-        
-        # Groq expects a file-like object with a name attribute
-        from io import BytesIO
-        audio_file = BytesIO(content)
-        audio_file.name = filename
 
+        # Pass tuple natively to ensure file extension is correctly read by the SDK
         transcription = client.audio.transcriptions.create(
-            file=audio_file,
+            file=(filename, content),
             model="whisper-large-v3",
             response_format="json",
-            language="en", # Can be auto-detected if removed
             temperature=0.0,
         )
         

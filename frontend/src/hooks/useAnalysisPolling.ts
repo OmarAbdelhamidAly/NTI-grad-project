@@ -17,7 +17,8 @@ export function useAnalysisPolling() {
     jobId: string, 
     systemMessageId: string,
     onUpdate: (id: string, data: Partial<Message>) => void,
-    onComplete: () => void
+    onComplete: () => void,
+    onHITL?: (jobId: string, job: AnalysisJob) => void
   ) => {
     setIsProcessing(true);
     
@@ -27,13 +28,14 @@ export function useAnalysisPolling() {
         
         const isDone = jobData.status === 'done';
         const isError = jobData.status === 'error';
+        const isAwaitingApproval = jobData.status === 'awaiting_approval';
 
         onUpdate(systemMessageId, {
           job: jobData,
           isStreaming: jobData.status === 'running' || jobData.status === 'pending'
         });
 
-        if (isDone || isError) {
+        if (isDone || isError || isAwaitingApproval) {
           clearInterval(pollInterval);
           
           if (isDone) {
@@ -46,6 +48,11 @@ export function useAnalysisPolling() {
             } catch (resErr) {
               console.error("Result fetch failed", resErr);
             }
+          }
+
+          if (isAwaitingApproval && onHITL) {
+            onUpdate(systemMessageId, { job: jobData, isStreaming: false });
+            onHITL(jobId, jobData);
           }
 
           setIsProcessing(false);

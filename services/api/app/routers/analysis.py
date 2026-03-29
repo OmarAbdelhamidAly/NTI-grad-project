@@ -105,6 +105,28 @@ async def submit_query(
     if body.chat_history:
         actual_question = json.dumps({"text": body.question, "history": body.chat_history})
 
+    # ── Master Strategist: Path Calculation ──────────────────────────
+    required_pillars = []
+    if source:
+        required_pillars.append(source.type)
+    
+    if body.multi_source_ids:
+        multi_result = await db.execute(
+            select(DataSource.id, DataSource.type)
+            .where(
+                DataSource.id.in_(body.multi_source_ids),
+                DataSource.tenant_id == current_user.tenant_id,
+            )
+        )
+        # Create a map to preserve selection order
+        type_map = {row.id: row.type for row in multi_result}
+        for sid in body.multi_source_ids:
+            if sid in type_map:
+                required_pillars.append(type_map[sid])
+    
+    # Remove duplicates but keep order if same type consecutive? 
+    # Actually, keep it simple: one pillar per source select.
+    
     job = AnalysisJob(
         id=uuid.uuid4(),
         tenant_id=current_user.tenant_id,
@@ -115,8 +137,9 @@ async def submit_query(
         kb_id=body.kb_id,
         status="pending",
         thinking_steps=[],
-        complexity_index=body.complexity_index,
-        total_pills=body.total_pills,
+        complexity_index=1,
+        total_pills=len(required_pillars),
+        required_pillars=required_pillars,
     )
     db.add(job)
     await db.commit()
@@ -142,6 +165,7 @@ async def submit_query(
         job_id=str(job.id),
         source_id=str(body.source_id),
         question=body.question,
+        pillars=required_pillars
     )
 
     result_json = AnalysisJobResponse.model_validate(job)
@@ -312,15 +336,15 @@ async def approve_job(
             detail="Paused analysis job not found",
         )
 
-    # ── Vision 2026: Sequential Master Strategist ─────────────────────
-    # If this was a sequential job awaiting feedback, increment and continue
+    # ── Master Strategist: Sequential Transition ──────────────────────
     if job.required_pillars and job.complexity_index < job.total_pills:
         # Move to the NEXT source
         job.complexity_index += 1
         
-        # In this master-strategist mode, we use multi_source_ids to find the next ID
-        if job.multi_source_ids and len(job.multi_source_ids) >= job.complexity_index:
-            next_source_id = job.multi_source_ids[job.complexity_index - 1]
+        # Mapping: Source 1 is primary (source_id), Source 2+ are in multi_source_ids
+        # index 2 -> multi_source_ids[0], index 3 -> multi_source_ids[1]
+        if job.multi_source_ids and len(job.multi_source_ids) >= (job.complexity_index - 1):
+            next_source_id = job.multi_source_ids[job.complexity_index - 2]
             job.source_id = next_source_id
             
         next_pillar = job.required_pillars[job.complexity_index - 1]

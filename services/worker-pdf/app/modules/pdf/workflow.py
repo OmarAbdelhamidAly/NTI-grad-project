@@ -1,23 +1,109 @@
-"""PDF Pipeline — 3-Way Architecture Router.
+import structlog
+from typing import Any, Dict, List, Literal, Union
+from langgraph.graph import END, StateGraph, START
 
-Segments requests based on `extraction_mode` to the respective isolated flow:
-  - 'fast_text': Text only, high speed.
-  - 'deep_vision': Full VLM multi-vector analysis, highest quality.
-  - 'hybrid_ocr': Smart text + selective OCR, balanced layout.
-"""
-from typing import Any
+from app.domain.analysis.entities import AnalysisState
+from app.modules.pdf.agents.query_refiner import query_refiner_agent
+from app.modules.pdf.agents.router_agent import router_agent
+from app.modules.pdf.agents.chat_agent import chat_agent
+from app.modules.pdf.agents.retrieval_agent import adaptive_retrieval_agent
+from app.modules.pdf.agents.verifier_agent import verifier_agent
+from app.modules.pdf.agents.analyst_agent import analyst_agent
+from app.modules.pdf.agents.output_assembler import output_assembler
+
+# Import existing flow agents
+from app.modules.pdf.flows.deep_vision.agents.pdf_agent import colpali_retrieval_agent as vision_synthesis
+from app.modules.pdf.flows.fast_text.agents.fast_text_agent import fast_text_retrieval_agent as text_synthesis
+from app.modules.pdf.flows.hybrid_ocr.agents.hybrid_ocr_agent import hybrid_ocr_retrieval_agent as ocr_synthesis
+
+logger = structlog.get_logger(__name__)
+
+# ── Conditional Routing ──────────────────────────────────────────────────────
+
+def route_after_router(state: AnalysisState) -> Literal["chat", "retrieval"]:
+    """Routes to direct chat or document retrieval."""
+    if state.get("route") == "greeting":
+        return "chat"
+    return "retrieval"
+
+def route_after_retrieval(state: AnalysisState) -> Literal["refine", "vision", "text", "ocr"]:
+    """Reflection loop: If retrieval fails, refinement is needed. Otherwise, pick synthesis mode."""
+    if state.get("reflection_needed"):
+        return "refine"
+    
+    mode = state.get("analysis_mode", "deep_vision")
+    if mode == "fast_text": return "text"
+    if mode == "hybrid": return "ocr"
+    return "vision"
+
+def route_after_verifier(state: AnalysisState) -> Literal["finalize", "vision", "text", "ocr"]:
+    """Anti-Hallucination loop: If verification fails, retry synthesis."""
+    if state.get("verified") is False and state.get("retry_count", 0) < 2:
+        mode = state.get("analysis_mode", "deep_vision")
+        if mode == "fast_text": return "text"
+        if mode == "hybrid": return "ocr"
+        return "vision"
+    return "finalize"
+
+# ── Graph Construction ───────────────────────────────────────────────────────
 
 def build_pdf_graph(checkpointer: Any = None, mode: str = "deep_vision") -> Any:
-    """Route construction to the appropriate isolated PDF workflow."""
+    """The Master PDF Orchestrator — unifying all flows with AI reasoning."""
+    graph = StateGraph(AnalysisState)
+
+    # 1. Add Nodes
+    graph.add_node("refine", query_refiner_agent)
+    graph.add_node("router", router_agent)
+    graph.add_node("chat", chat_agent)
+    graph.add_node("retrieval", adaptive_retrieval_agent)
     
-    if mode == "fast_text":
-        from app.modules.pdf.flows.fast_text.workflow import build_fast_text_graph
-        return build_fast_text_graph(checkpointer=checkpointer)
-        
-    elif mode == "hybrid_ocr":
-        from app.modules.pdf.flows.hybrid_ocr.workflow import build_hybrid_ocr_graph
-        return build_hybrid_ocr_graph(checkpointer=checkpointer)
-        
-    else:  # default to deep_vision
-        from app.modules.pdf.flows.deep_vision.workflow import build_deep_vision_graph
-        return build_deep_vision_graph(checkpointer=checkpointer)
+    # Synthesis Engines
+    graph.add_node("vision_synthesis", vision_synthesis)
+    graph.add_node("text_synthesis", text_synthesis)
+    graph.add_node("ocr_synthesis", ocr_synthesis)
+    
+    graph.add_node("verifier", verifier_agent)
+    graph.add_node("analyst", analyst_agent)
+    graph.add_node("output_assembler", output_assembler)
+
+    # 2. Define Edges
+    graph.add_edge(START, "refine")
+    graph.add_edge("refine", "router")
+    
+    graph.add_conditional_edges(
+        "router",
+        route_after_router,
+        {
+            "chat": "chat",
+            "retrieval": "retrieval"
+        }
+    )
+    
+    graph.add_conditional_edges(
+        "retrieval",
+        route_after_retrieval,
+        {
+            "refine": "refine",
+            "vision": "vision_synthesis",
+            "text": "text_synthesis",
+            "ocr": "ocr_synthesis"
+        }
+    )
+    
+    graph.add_conditional_edges(
+        "verifier",
+        route_after_verifier,
+        {
+            "vision": "vision_synthesis",
+            "text": "text_synthesis",
+            "ocr": "ocr_synthesis",
+            "finalize": "analyst"
+        }
+    )
+    
+    graph.add_edge("chat", "output_assembler")
+    graph.add_edge("analyst", "output_assembler")
+    graph.add_edge("output_assembler", END)
+
+    # Compile with HITL interrupt point after retrieval to show retrieved pages
+    return graph.compile(checkpointer=checkpointer, interrupt_after=["retrieval"])

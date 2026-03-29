@@ -152,17 +152,9 @@ async def _execute_pillar(job_id: str) -> dict:
             
             if graph_state.next:
                  job.status = "awaiting_approval"
-                 logger.info("job_paused_for_approval", job_id=job_id, next_nodes=graph_state.next)
-                 await db.commit()
+                 logger.info("job_paused_for_internal_human_feedback", job_id=job_id, next_nodes=graph_state.next)
             else:
-                  logger.info("saving_analysis_results", 
-                              job_id=job_id, 
-                              has_chart=res_data.get("chart_json") is not None, 
-                              insight_len=len(res_data.get("insight_report") or ""))
-                  
-                  # Update Job Metadata
-                  job.generated_sql = res_data.get("generated_sql") or job.generated_sql
-                  job.intent = res_data.get("intent") or job.intent
+                  logger.info("saving_pillar_analysis_results", job_id=job_id)
                   
                   # Save Analysis Results (Upsert)
                   # Mapping ORM attributes to their database column names for absolute consistency
@@ -189,11 +181,17 @@ async def _execute_pillar(job_id: str) -> dict:
                   )
                   await db.execute(stmt)
                   
-                  # ── Vision 2026: Multi-Agentic Coordination ──────────
-                  if job.required_pillars and len(job.required_pillars) > 1:
-                      job.status = "done" # Mark partial done
-                      celery_app.send_task("synthesis_task", args=[job_id], queue="governance")
-                      logger.info("pillar_complete_triggered_synthesis", job_id=job_id)
+                  # ── Master Strategist: Handoff Logic ──────────────────
+                  current_report = res_data.get("insight_report") or res_data.get("executive_summary") or "Analysis complete."
+                  pillar_name = source.type.upper() if source else "SQL"
+                  
+                  # Enrich the unified synthesis report
+                  header = f"\n\n### 🛡️ SPECIALIST REPORT: {pillar_name} (Step {job.complexity_index}/{job.total_pills})\n"
+                  job.synthesis_report = (job.synthesis_report or "") + header + current_report
+
+                  if job.required_pillars and job.complexity_index < job.total_pills:
+                      job.status = "awaiting_approval"
+                      logger.info("sequential_step_paused", job_id=job_id, current_index=job.complexity_index)
                   else:
                       job.status = "done"
                       job.completed_at = datetime.now(timezone.utc)

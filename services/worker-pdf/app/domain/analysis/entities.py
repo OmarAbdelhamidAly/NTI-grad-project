@@ -99,3 +99,9 @@ class AnalysisState(TypedDict, total=False):
     # ── Progressive Complexity ────────────────────────────────
     complexity_index: int        # Current index in a batch (1-indexed)
     total_pills: int            # Total number of pills in the batch
+    
+    # ── PDF Orchestration ────────────────────────────────────
+    analysis_mode: str          # "fast_text" | "hybrid" | "deep_vision"
+    route: str                  # "greeting" | "query"
+    reflection_needed: bool
+    verified: bool

@@ -116,6 +116,9 @@ export interface AnalysisJob {
   synthesis_report?: string;
   executive_summary?: string;
   multi_source_ids?: string[];
+  required_pillars?: string[];
+  complexity_index?: number;
+  total_pills?: number;
   recommendations_json?: any[];
   follow_up_suggestions?: string[];
   visual_context?: Array<{ page_number: number, image_base64: string }>;

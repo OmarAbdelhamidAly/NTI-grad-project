@@ -1,13 +1,11 @@
 import os
 import uuid
-import torch
 import structlog
 import json
 import base64
 from typing import Any, Dict, List, Optional
 from io import BytesIO
 from pdf2image import convert_from_path
-from colpali_engine.models import ColPali, ColPaliProcessor
 from langchain_core.messages import HumanMessage
 from app.domain.analysis.entities import AnalysisState
 from app.infrastructure.database.postgres import async_session_factory
@@ -15,44 +13,13 @@ from app.infrastructure.llm import get_llm
 from app.models.knowledge import Document, KnowledgeBase
 from app.models.data_source import DataSource
 from app.modules.pdf.utils.qdrant_multivector import QdrantMultiVectorManager
+from app.modules.pdf.flows.deep_vision.agents.indexing_agent import _get_embedding_model
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = structlog.get_logger(__name__)
 
-# Lazy load model to save memory if not called
-_model = None
-_processor = None
-
-def get_colpali():
-    global _model, _processor
-    if _model is None:
-        import psutil
-        model_name = "vidore/colpali-v1.2"
-        _processor = ColPaliProcessor.from_pretrained(model_name)
-
-        available_gb = psutil.virtual_memory().available / (1024 ** 3)
-        total_gb = psutil.virtual_memory().total / (1024 ** 3)
-        logger.info("memory_info", available_gb=round(available_gb, 1), total_gb=round(total_gb, 1))
-
-        if total_gb >= 12:
-            # Production EKS / high-RAM machine: simple loading, GPU or CPU auto-selected
-            logger.info("model_loading_strategy", strategy="production_auto")
-            _model = ColPali.from_pretrained(
-                model_name,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-            ).eval()
-        else:
-            # Local / memory-constrained: rely on OS swap instead of accelerate custom offload
-            logger.info("model_loading_strategy", strategy="local_swap")
-            _model = ColPali.from_pretrained(
-                model_name,
-                torch_dtype=torch.bfloat16,
-                device_map="cpu",
-                low_cpu_mem_usage=True,
-            ).eval()
-    return _model, _processor
+# No local models needed for Groq Vision flow
 
 
 async def _get_doc_context(kb_id: Optional[str] = None, source_id: Optional[str] = None) -> Dict[str, Any]:
@@ -108,7 +75,8 @@ async def colpali_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
         return {"error": "No Knowledge Base or Source ID provided for PDF RAG."}
 
     try:
-        model, processor = get_colpali()
+        # 1. Initialize models
+        embed_model = _get_embedding_model()
         
         if kb_id:
             collection_name = f"kb_{str(kb_id).replace('-', '')}"
@@ -116,22 +84,16 @@ async def colpali_retrieval_agent(state: AnalysisState) -> Dict[str, Any]:
             collection_name = f"ds_{str(source_id).replace('-', '')}"
             
         qdrant = QdrantMultiVectorManager(collection_name=collection_name)
-        await qdrant.ensure_collection()
+        # await qdrant.ensure_collection() # Indexing should have done this
 
-        # 1. Encode Query
-        with torch.no_grad():
-            batch_query = processor.process_queries([question]).to(model.device)
-            query_embeddings = model.forward(**batch_query)
-            query_vector = query_embeddings[0].cpu().tolist()
+        # 2. Encode Query
+        query_vector = embed_model.embed_query(question)
             
-        # 2. Search
-        search_results = qdrant.client.query_points(
-            collection_name=qdrant.collection_name,
-            query=query_vector,
-            using="colpali",
-            limit=3,
-            with_payload=True
-        ).points
+        # 3. Search via Text Description
+        search_results = qdrant.search_text(
+            query_vector=query_vector,
+            limit=3
+        )
 
         if not search_results:
             return {
@@ -209,8 +171,8 @@ Provide an answer based ONLY on the visual context provided. Answer in the same 
         for b64_img in base64_images:
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
 
-        # We MUST use a vision-capable model (Gemini) for this step
-        llm = get_llm(temperature=0, model="gemini-flash-latest")
+        # We now use Groq Llama 3.2 Vision for maximum speed and performance
+        llm = get_llm(temperature=0, model="llama-3.2-11b-vision-preview")
         res = await llm.ainvoke([HumanMessage(content=content)])
         
         visual_context = [{"page_number": page_nums[i], "image_base64": f"data:image/jpeg;base64,{s}"} for i, s in enumerate(base64_images)]

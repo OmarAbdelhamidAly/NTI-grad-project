@@ -62,11 +62,6 @@ RUN mkdir -p /tmp/tenants /app/hf_cache && \
 # Ensure all files are owned by appuser
 RUN chown -R appuser:appuser /app
 
-# Pre-download ColPali model to cache it in the image using light-weight snapshot_download
-# This avoids memory exhaustion during build (Killed) and seeds the persistent volume
-ENV HF_HOME=/app/hf_cache
-RUN python3 -c "from huggingface_hub import snapshot_download; model_name='vidore/colpali-v1.2'; snapshot_download(repo_id=model_name)"
-
 # Add healthcheck tools
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 

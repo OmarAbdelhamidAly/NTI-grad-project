@@ -38,22 +38,20 @@ weasyprint==63.1
 
 # AI / LLM
 langchain==0.3.14
+langchain-community==0.3.14
 langchain-openai==0.3.1
 langchain-groq==0.2.3
 langchain-google-genai==2.0.9
 langchain-ollama==0.2.0
 langgraph==0.2.60
 langgraph-checkpoint-redis>=0.1.0
+fastembed>=0.4.0
 
-qdrant-client[fastembed]>=1.11.0
+qdrant-client>=1.11.0
 pypdf==5.1.0
 pdf2image==1.17.0
 
-# Advanced RAG (ColPali/MUVERA)
-colpali-engine==0.3.4
-transformers>=4.45.0
-torch>=2.4.0
-einops>=0.8.0
+# Advanced RAG (Vision/Descriptions)
 pillow>=10.4.0
 
 # Encryption
@@ -72,5 +70,4 @@ structlog==24.4.0
 
 # Fast Text RAG
 PyMuPDF==1.25.1
-sentence-transformers==3.0.1
 

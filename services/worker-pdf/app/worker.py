@@ -92,6 +92,7 @@ async def _execute_pillar(job_id: str) -> dict:
                 "source_id": str(job.source_id),
                 "source_type": source.type if source else "pdf",
                 "kb_id": str(job.kb_id) if job.kb_id else None,
+                "analysis_mode": analysis_mode,
             }
 
             logger.info("pdf_graph_execution_started", job_id=job_id)
@@ -148,20 +149,31 @@ async def _execute_pillar(job_id: str) -> dict:
             )
             await db.execute(stmt)
             
-            job.status = "done"
-            job.completed_at = datetime.now(timezone.utc)
-            logger.info("pillar_complete_final", job_id=job_id)
+            # ── Master Strategist: Handoff Logic ─────────────────────────
+            current_report = res_data.get("insight_report") or res_data.get("executive_summary") or "Analysis complete."
+            pillar_name = source.type.upper() if source else "PDF"
             
-            # Trigger semantic cache
-            report_text = res_data.get("insight_report") or res_data.get("executive_summary") or ""
-            if report_text:
+            # Enrich the unified synthesis report
+            header = f"\n\n### 🛡️ SPECIALIST REPORT: {pillar_name} (Step {job.complexity_index}/{job.total_pills})\n"
+            job.synthesis_report = (job.synthesis_report or "") + header + current_report
+
+            if job.required_pillars and job.complexity_index < job.total_pills:
+                job.status = "awaiting_approval"
+                logger.info("sequential_step_paused", job_id=job_id, current_index=job.complexity_index)
+            else:
+                job.status = "done"
+                job.completed_at = datetime.now(timezone.utc)
+                logger.info("pillar_complete_final", job_id=job_id)
+            
+            # Trigger semantic cache for final or partial results
+            if current_report:
                 try:
-                    celery_app.send_task("cache_result_task", args=[parsed_text, report_text, str(job.tenant_id)], queue="governance")
+                    celery_app.send_task("cache_result_task", args=[parsed_text, current_report, str(job.tenant_id)], queue="governance")
                 except Exception as e:
                     logger.warning("cache_trigger_failed", error=str(e))
+                    
             await db.commit()
-            
-            return {"status": "done"}
+            return {"status": job.status}
 
     except Exception as e:
         logger.error("pdf_pillar_failed", error=str(e), job_id=job_id)
@@ -209,22 +221,37 @@ async def _execute_source_indexing(source_id: str):
 
     logger.info("indexing_mode_selected", source_id=source_id, mode=indexing_mode)
 
-    if indexing_mode == "fast_text":
-        result = await fast_indexing_agent(source_id)
-    else:
-        result = await indexing_agent_source(source_id)
+    results = []
+    
+    # 1. Always run Fast Text (Base Layer)
+    logger.info("running_base_indexing", mode="fast_text")
+    results.append(await fast_indexing_agent(source_id))
 
-    print(f"[STRATEGIC SIGNAL] INDEXING COMPLETED FOR {source_id}: {result.get('status')}")
+    # 2. Add Hybrid OCR Layer if requested
+    if indexing_mode in ["hybrid", "deep_vision"]:
+        logger.info("running_hybrid_layer", mode="hybrid_ocr")
+        # Currently hybrid_ocr_agent is retrieval-only, but we could add indexing here.
+        # For now, we note that text is indexed and vision blocks will be processed at query time.
+        pass
 
-    if result.get("status") == "success":
-        print(f"[STRATEGIC SIGNAL] TRIGGERING AUTO-ANALYSIS FOR {source_id}")
+    # 3. Add Deep Vision Layer if requested
+    if indexing_mode == "deep_vision":
+        logger.info("running_vision_layer", mode="deep_vision")
+        results.append(await indexing_agent_source(source_id))
+
+    # Determine final status
+    final_status = "success" if all(r.get("status") == "success" for r in results if isinstance(r, dict)) else "partial_failure"
+    
+    logger.info("tiered_indexing_completed", source_id=source_id, final_status=final_status)
+
+    if final_status == "success":
         celery_app.send_task(
             "auto_analysis_task",
             args=[source_id, "00000000-0000-0000-0000-000000000000"],
             queue="governance"
         )
 
-    return result
+    return {"status": final_status, "modes": [r.get("mode") for r in results if isinstance(r, dict)]}
 
 async def _execute_indexing(doc_id: str):
     from app.modules.pdf.flows.deep_vision.agents.indexing_agent import indexing_agent
