@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# ffmpeg is required by faster-whisper for audio decoding
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.worker.txt .
+RUN pip install --no-cache-dir -r requirements.worker.txt
+
+COPY . .
+```
+
+Save it (`Ctrl + S`).
+
+---
+
+## Step 10 — Create `requirements.worker.txt`
+
+Same folder `services/worker-stt/` → **New File** → `requirements.worker.txt`
+
+Paste:
+```
+faster-whisper==1.1.0
+celery==5.4.0
+redis==5.2.1
+langchain-groq
+langchain-core
+pydub
